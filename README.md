@@ -1,27 +1,22 @@
 # Folder Sync Tool (PySide6)
 
-A desktop GUI to sync folders between:
-
-- a local repository folder,
-- a repository URL,
-- and Windows/local folders.
+A desktop GUI to sync directly between local folders and remote repositories.
 
 ## Features
 
-- PySide6 GUI.
-- Sync pairs with **Source folder** and **Target folder**.
+- Pair table with explicit endpoint types:
+  - **Path**
+  - **Repository URL**
+- Sync from local folder -> remote repository or remote repository -> local folder.
 - Background worker execution using multiple threads (GUI stays responsive).
 - Progress bar with live percentage and current operation text.
 - Optional one-way or two-way sync.
 - Optional stale-file cleanup on destination.
-- Optional auto update checks.
-- Optional **continuous watch mode** (checks permanently without using interval).
-- Optional auto-sync on new commit/change.
-- Repository URL watch mode tracks **`main` branch commits** (`refs/heads/main`).
-- Optional **auto commit and push** after sync.
+- Optional auto update checks and continuous watch mode.
+- Optional auto-sync on detected source change.
+- Optional auto commit/push for repository targets.
 - Optional login with username/password for repository URLs.
-- Optional encrypted credential storage.
-- Persisted sync pair configuration across restarts.
+- Persisted settings and sync table across restarts.
 
 ## Requirements
 
@@ -43,9 +38,6 @@ python sync_gui.py
 
 ## Notes
 
-- For URL repos with relative source/target paths, **Local repo workspace** is required (otherwise sync is blocked).
-- If **Local repo workspace** is empty, a cache path under `~/.repo_sync_gui/repo_cache` is used.
-- Auto-update on repository URLs checks `refs/heads/main`.
-- If a new commit appears on `main`, auto-sync runs immediately (when enabled).
-- Continuous watch mode ignores interval and checks continuously in short cycles.
-- Auto commit/push uses the resolved local git repository (workspace path or cache clone).
+- For `Repository URL` entries, the app resolves and maintains a local clone internally.
+- The source/target selection now happens per row via endpoint type dropdowns.
+- Path picker buttons work only for rows where endpoint type is `Path`.

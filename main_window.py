@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QRunnable, QSettings, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -32,6 +33,8 @@ from sync_engine import SyncEngine
 from sync_models import SyncPair
 
 REMOTE_WATCH_BRANCH = "main"
+TYPE_PATH = "Path"
+TYPE_REPO = "Repository URL"
 
 
 class WorkerSignals(QObject):
@@ -60,8 +63,8 @@ class FunctionTask(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Folder Sync (Repo URL / Local / Windows)")
-        self.resize(1050, 790)
+        self.setWindowTitle("Folder Sync (Path <-> Repository URL)")
+        self.resize(1100, 780)
 
         self.settings = QSettings("RepoSync", "FolderSyncGui")
         self.app_data_dir = Path.home() / ".repo_sync_gui"
@@ -74,18 +77,6 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(max(2, self.thread_pool.maxThreadCount()))
 
-        self.repo_root_edit = QLineEdit()
-        self.repo_root_edit.setPlaceholderText(
-            "Optional: Local repo root path or repository URL (https://..., git@..., ...)."
-        )
-        browse_repo_btn = QPushButton("Browse")
-        browse_repo_btn.clicked.connect(self._pick_repo_root)
-
-        self.local_repo_edit = QLineEdit()
-        self.local_repo_edit.setPlaceholderText("Optional: local repository workspace path for URL repos")
-        browse_local_repo_btn = QPushButton("Browse local repo")
-        browse_local_repo_btn.clicked.connect(self._pick_local_repo_root)
-
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Optional repository username")
 
@@ -95,8 +86,8 @@ class MainWindow(QMainWindow):
 
         self.save_credentials_checkbox = QCheckBox("Save credentials encrypted")
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Source folder", "Target folder"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Source type", "Source", "Target type", "Target"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setAlternatingRowColors(True)
 
@@ -104,10 +95,11 @@ class MainWindow(QMainWindow):
         add_row_btn.clicked.connect(self._add_row)
         remove_row_btn = QPushButton("Remove selected pair")
         remove_row_btn.clicked.connect(self._remove_selected_rows)
-        browse_source_btn = QPushButton("Choose source for selected row")
-        browse_source_btn.clicked.connect(self._pick_source_for_selected)
-        browse_target_btn = QPushButton("Choose target for selected row")
-        browse_target_btn.clicked.connect(self._pick_target_for_selected)
+
+        browse_source_btn = QPushButton("Browse source path")
+        browse_source_btn.clicked.connect(lambda: self._pick_path_for_selected(column=1, type_column=0))
+        browse_target_btn = QPushButton("Browse target path")
+        browse_target_btn.clicked.connect(lambda: self._pick_path_for_selected(column=3, type_column=2))
 
         self.two_way_checkbox = QCheckBox("Two-way sync")
         self.delete_checkbox = QCheckBox("Delete stale files on destination")
@@ -125,7 +117,8 @@ class MainWindow(QMainWindow):
 
         self.auto_sync_on_change_checkbox = QCheckBox("Auto sync on new commit/change")
 
-        self.auto_push_checkbox = QCheckBox("Auto commit and push to GitHub after sync")
+        self.auto_push_checkbox = QCheckBox("Auto commit and push repository targets after sync")
+        self.auto_push_checkbox.setChecked(True)
         self.push_branch_edit = QLineEdit("main")
         self.push_branch_edit.setPlaceholderText("Push branch (for example: main)")
         self.commit_message_edit = QLineEdit("Sync updates")
@@ -148,17 +141,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         top_grid = QGridLayout()
-        top_grid.addWidget(QLabel("Repo root / Repo URL (optional)"), 0, 0)
-        top_grid.addWidget(self.repo_root_edit, 0, 1)
-        top_grid.addWidget(browse_repo_btn, 0, 2)
-        top_grid.addWidget(QLabel("Local repo workspace (for URL, optional)"), 1, 0)
-        top_grid.addWidget(self.local_repo_edit, 1, 1)
-        top_grid.addWidget(browse_local_repo_btn, 1, 2)
-        top_grid.addWidget(QLabel("Username"), 2, 0)
-        top_grid.addWidget(self.username_edit, 2, 1, 1, 2)
-        top_grid.addWidget(QLabel("Password / Token"), 3, 0)
-        top_grid.addWidget(self.password_edit, 3, 1, 1, 2)
-        top_grid.addWidget(self.save_credentials_checkbox, 4, 1, 1, 2)
+        top_grid.addWidget(QLabel("Username"), 0, 0)
+        top_grid.addWidget(self.username_edit, 0, 1)
+        top_grid.addWidget(QLabel("Password / Token"), 1, 0)
+        top_grid.addWidget(self.password_edit, 1, 1)
+        top_grid.addWidget(self.save_credentials_checkbox, 2, 1)
         layout.addLayout(top_grid)
 
         layout.addWidget(self.table)
@@ -205,7 +192,6 @@ class MainWindow(QMainWindow):
         self.check_timer.timeout.connect(self._on_periodic_check)
 
         self._load_settings()
-
         if self.table.rowCount() == 0:
             self._add_row()
             self._add_row()
@@ -223,58 +209,61 @@ class MainWindow(QMainWindow):
     def _append_log(self, message: str) -> None:
         self.log.appendPlainText(message)
 
-    def _pick_repo_root(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select repository root")
-        if selected:
-            self.repo_root_edit.setText(selected)
-
-    def _pick_local_repo_root(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select local repository workspace")
-        if selected:
-            self.local_repo_edit.setText(selected)
+    def _create_type_combo(self, value: str = TYPE_PATH) -> QComboBox:
+        combo = QComboBox()
+        combo.addItems([TYPE_PATH, TYPE_REPO])
+        combo.setCurrentText(value if value in (TYPE_PATH, TYPE_REPO) else TYPE_PATH)
+        return combo
 
     def _add_row(self) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(""))
+        self.table.setCellWidget(row, 0, self._create_type_combo(TYPE_PATH))
         self.table.setItem(row, 1, QTableWidgetItem(""))
+        self.table.setCellWidget(row, 2, self._create_type_combo(TYPE_PATH))
+        self.table.setItem(row, 3, QTableWidgetItem(""))
 
     def _remove_selected_rows(self) -> None:
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
         for row in rows:
             self.table.removeRow(row)
 
-    def _pick_source_for_selected(self) -> None:
+    def _pick_path_for_selected(self, column: int, type_column: int) -> None:
         row = self.table.currentRow()
         if row < 0:
             QMessageBox.information(self, "Selection required", "Please select a row first.")
             return
-        selected = QFileDialog.getExistingDirectory(self, "Select source folder")
-        if selected:
-            self.table.setItem(row, 0, QTableWidgetItem(selected))
 
-    def _pick_target_for_selected(self) -> None:
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Selection required", "Please select a row first.")
+        combo = self.table.cellWidget(row, type_column)
+        selected_type = combo.currentText() if isinstance(combo, QComboBox) else TYPE_PATH
+        if selected_type != TYPE_PATH:
+            QMessageBox.information(self, "Path only", "Path picker only works when type is 'Path'.")
             return
-        selected = QFileDialog.getExistingDirectory(self, "Select target folder")
+
+        selected = QFileDialog.getExistingDirectory(self, "Select folder path")
         if selected:
-            self.table.setItem(row, 1, QTableWidgetItem(selected))
+            self.table.setItem(row, column, QTableWidgetItem(selected))
 
     def _snapshot_config(self) -> dict:
         pairs: List[Dict[str, str]] = []
         for row in range(self.table.rowCount()):
-            src_item = self.table.item(row, 0)
-            dst_item = self.table.item(row, 1)
-            pairs.append({
-                "source": src_item.text().strip() if src_item else "",
-                "target": dst_item.text().strip() if dst_item else "",
-            })
+            source_type_combo = self.table.cellWidget(row, 0)
+            target_type_combo = self.table.cellWidget(row, 2)
+            source_type = source_type_combo.currentText() if isinstance(source_type_combo, QComboBox) else TYPE_PATH
+            target_type = target_type_combo.currentText() if isinstance(target_type_combo, QComboBox) else TYPE_PATH
+
+            src_item = self.table.item(row, 1)
+            dst_item = self.table.item(row, 3)
+            pairs.append(
+                {
+                    "source_type": source_type,
+                    "source": src_item.text().strip() if src_item else "",
+                    "target_type": target_type,
+                    "target": dst_item.text().strip() if dst_item else "",
+                }
+            )
 
         return {
-            "repo_input": self.repo_root_edit.text().strip(),
-            "local_repo_path": self.local_repo_edit.text().strip(),
             "username": self.username_edit.text().strip(),
             "password": self.password_edit.text().strip(),
             "pairs": pairs,
@@ -288,44 +277,57 @@ class MainWindow(QMainWindow):
         }
 
     @staticmethod
-    def _build_pairs(config: dict, repo_base: Optional[Path]) -> List[SyncPair]:
-        if RepoResolver.is_repo_url(config.get("repo_input", "")) and not config.get("local_repo_path", "").strip():
-            for idx, pair in enumerate(config["pairs"], start=1):
-                src = pair.get("source", "").strip()
-                dst = pair.get("target", "").strip()
-                if not src and not dst:
-                    continue
-                if (src and not Path(src).is_absolute()) or (dst and not Path(dst).is_absolute()):
-                    raise ValueError(
-                        f"Row {idx}: Relative paths with repo URL require 'Local repo workspace'. "
-                        "Please set a local repo workspace path."
-                    )
+    def _resolve_endpoint(
+        resolver: RepoResolver,
+        endpoint_type: str,
+        endpoint_value: str,
+        username: str,
+        password: str,
+    ) -> Tuple[Path, Optional[str]]:
+        if endpoint_type == TYPE_REPO:
+            path = resolver.resolve(endpoint_value, username=username, password=password)
+            if path is None:
+                raise ValueError("Repository URL is empty.")
+            return path, endpoint_value
 
-        pairs: List[SyncPair] = []
-        for idx, pair in enumerate(config["pairs"], start=1):
-            source_text = pair.get("source", "").strip()
-            target_text = pair.get("target", "").strip()
-            if not source_text and not target_text:
-                continue
-            if not source_text or not target_text:
-                raise ValueError(f"Row {idx}: both columns are required.")
-            source_path = MainWindow._resolve_pair_path(source_text, repo_base, idx, "source")
-            target_path = MainWindow._resolve_pair_path(target_text, repo_base, idx, "target")
-            pairs.append(SyncPair(source=source_path, target=target_path))
-        if not pairs:
-            raise ValueError("Please define at least one sync pair.")
-        return pairs
+        if not endpoint_value:
+            raise ValueError("Path value is empty.")
+        path = Path(endpoint_value)
+        if not path.is_absolute():
+            raise ValueError(f"Path must be absolute: {endpoint_value}")
+        return path, None
 
     @staticmethod
-    def _resolve_pair_path(raw_path: str, repo_base: Optional[Path], row_number: int, role: str) -> Path:
-        candidate = Path(raw_path)
-        if candidate.is_absolute():
-            return candidate
-        if repo_base is None:
-            raise ValueError(
-                f"Row {row_number}: relative {role} path '{raw_path}' needs a repo root path or repo URL."
+    def _build_pairs(config: dict, resolver: RepoResolver) -> Tuple[List[SyncPair], List[Tuple[Path, str]]]:
+        pairs: List[SyncPair] = []
+        repo_targets: List[Tuple[Path, str]] = []
+
+        for idx, pair in enumerate(config["pairs"], start=1):
+            src_type = pair.get("source_type", TYPE_PATH)
+            src_value = pair.get("source", "").strip()
+            dst_type = pair.get("target_type", TYPE_PATH)
+            dst_value = pair.get("target", "").strip()
+
+            if not src_value and not dst_value:
+                continue
+            if not src_value or not dst_value:
+                raise ValueError(f"Row {idx}: both source and target are required.")
+
+            source_path, _ = MainWindow._resolve_endpoint(
+                resolver, src_type, src_value, config["username"], config["password"]
             )
-        return repo_base / candidate
+            target_path, target_repo_url = MainWindow._resolve_endpoint(
+                resolver, dst_type, dst_value, config["username"], config["password"]
+            )
+
+            pairs.append(SyncPair(source=source_path, target=target_path))
+            if target_repo_url:
+                repo_targets.append((target_path, target_repo_url))
+
+        if not pairs:
+            raise ValueError("Please define at least one sync pair.")
+
+        return pairs, repo_targets
 
     def _run_sync_async(self, show_error_dialog: bool, clear_log: bool) -> None:
         if self.sync_in_progress:
@@ -356,15 +358,10 @@ class MainWindow(QMainWindow):
     def _sync_job(self, config: dict, signals: WorkerSignals) -> dict:
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
-        repo_base = resolver.resolve(
-            config["repo_input"],
-            config["username"],
-            config["password"],
-            config.get("local_repo_path", ""),
-        )
-        pairs = self._build_pairs(config, repo_base)
-        if repo_base is not None:
-            logger(f"[INFO] Active repository path: {repo_base}")
+
+        pairs, repo_targets = self._build_pairs(config, resolver)
+        for _, url in repo_targets:
+            logger(f"[INFO] Active repository target: {url}")
 
         engine = SyncEngine(logger)
         engine.sync_pairs(
@@ -375,11 +372,14 @@ class MainWindow(QMainWindow):
         )
 
         if config["auto_push"]:
-            if repo_base is None:
-                logger("[WARN] Auto push skipped: repo path unresolved.")
-            else:
-                logger(f"[INFO] Auto commit/push started on {repo_base}...")
-                GitPublisher(logger).commit_and_push(repo_base, config["push_branch"], config["commit_message"])
+            pushed_paths = set()
+            for repo_path, repo_url in repo_targets:
+                key = str(repo_path)
+                if key in pushed_paths:
+                    continue
+                pushed_paths.add(key)
+                logger(f"[INFO] Auto commit/push started on {repo_path} ({repo_url})...")
+                GitPublisher(logger).commit_and_push(repo_path, config["push_branch"], config["commit_message"])
 
         new_state = self._compute_state_value(config, pairs, resolver)
         return {"new_state": new_state}
@@ -403,10 +403,7 @@ class MainWindow(QMainWindow):
     def _schedule_next_check(self) -> None:
         if not self.periodic_check_checkbox.isChecked():
             return
-        if self.continuous_watch_checkbox.isChecked():
-            self.check_timer.start(1000)
-        else:
-            self.check_timer.start(self.interval_spinbox.value() * 1000)
+        self.check_timer.start(1000 if self.continuous_watch_checkbox.isChecked() else self.interval_spinbox.value() * 1000)
 
     def _update_timer_state(self) -> None:
         self.interval_spinbox.setEnabled(
@@ -441,24 +438,7 @@ class MainWindow(QMainWindow):
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
 
-        if config["repo_input"] and RepoResolver.is_repo_url(config["repo_input"]):
-            new_state = resolver.get_remote_branch_head(
-                config["repo_input"],
-                branch=REMOTE_WATCH_BRANCH,
-                username=config["username"],
-                password=config["password"],
-                local_repo_path=config.get("local_repo_path", ""),
-            )
-        else:
-            repo_base = resolver.resolve(
-                config["repo_input"],
-                config["username"],
-                config["password"],
-                config.get("local_repo_path", ""),
-            )
-            pairs = self._build_pairs(config, repo_base)
-            new_state = self._calculate_state_hash(pairs)
-
+        new_state = self._compute_state_by_sources(config, resolver)
         changed = config["last_state_hash"] != "" and new_state != config["last_state_hash"]
         return {"new_state": new_state, "changed": changed, "auto_sync": config["auto_sync"]}
 
@@ -486,34 +466,42 @@ class MainWindow(QMainWindow):
         self._set_status("Watching for new commits/changes...")
         self._schedule_next_check()
 
-    def _compute_state_value(self, config: dict, pairs: List[SyncPair], resolver: RepoResolver) -> str:
-        if config["repo_input"] and RepoResolver.is_repo_url(config["repo_input"]):
-            return resolver.get_remote_branch_head(
-                config["repo_input"],
-                branch=REMOTE_WATCH_BRANCH,
-                username=config["username"],
-                password=config["password"],
-                local_repo_path=config.get("local_repo_path", ""),
-            )
-        return self._calculate_state_hash(pairs)
-
-    @staticmethod
-    def _calculate_state_hash(pairs: List[SyncPair]) -> str:
+    def _compute_state_by_sources(self, config: dict, resolver: RepoResolver) -> str:
         hasher = hashlib.sha256()
-        for pair in pairs:
-            if not pair.source.exists() or not pair.source.is_dir():
+        for pair in config["pairs"]:
+            source_type = pair.get("source_type", TYPE_PATH)
+            source_value = pair.get("source", "").strip()
+            if not source_value:
                 continue
-            hasher.update(str(pair.source).encode("utf-8"))
-            for file_path in sorted(p for p in pair.source.rglob("*") if p.is_file()):
-                stat = file_path.stat()
-                hasher.update(str(file_path).encode("utf-8"))
-                hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
-                hasher.update(str(stat.st_size).encode("utf-8"))
+
+            if source_type == TYPE_REPO:
+                head = resolver.get_remote_branch_head(
+                    source_value,
+                    branch=REMOTE_WATCH_BRANCH,
+                    username=config["username"],
+                    password=config["password"],
+                )
+                hasher.update(source_value.encode("utf-8"))
+                hasher.update(head.encode("utf-8"))
+            else:
+                path = Path(source_value)
+                if not path.exists() or not path.is_dir():
+                    continue
+                hasher.update(str(path).encode("utf-8"))
+                for file_path in sorted(p for p in path.rglob("*") if p.is_file()):
+                    stat = file_path.stat()
+                    hasher.update(str(file_path).encode("utf-8"))
+                    hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+                    hasher.update(str(stat.st_size).encode("utf-8"))
+
         return hasher.hexdigest()
 
+    def _compute_state_value(self, config: dict, pairs: List[SyncPair], resolver: RepoResolver) -> str:
+        # Keep compatibility by computing based on current source definitions from config.
+        _ = pairs
+        return self._compute_state_by_sources(config, resolver)
+
     def _save_settings(self) -> None:
-        self.settings.setValue("repo_input", self.repo_root_edit.text())
-        self.settings.setValue("local_repo_path", self.local_repo_edit.text())
         self.settings.setValue("two_way", self.two_way_checkbox.isChecked())
         self.settings.setValue("delete_stale", self.delete_checkbox.isChecked())
         self.settings.setValue("periodic_check", self.periodic_check_checkbox.isChecked())
@@ -527,11 +515,15 @@ class MainWindow(QMainWindow):
 
         pairs: List[Dict[str, str]] = []
         for row in range(self.table.rowCount()):
-            src_item = self.table.item(row, 0)
-            dst_item = self.table.item(row, 1)
+            src_type_combo = self.table.cellWidget(row, 0)
+            dst_type_combo = self.table.cellWidget(row, 2)
+            src_item = self.table.item(row, 1)
+            dst_item = self.table.item(row, 3)
             pairs.append(
                 {
+                    "source_type": src_type_combo.currentText() if isinstance(src_type_combo, QComboBox) else TYPE_PATH,
                     "source": src_item.text().strip() if src_item else "",
+                    "target_type": dst_type_combo.currentText() if isinstance(dst_type_combo, QComboBox) else TYPE_PATH,
                     "target": dst_item.text().strip() if dst_item else "",
                 }
             )
@@ -549,15 +541,13 @@ class MainWindow(QMainWindow):
         self.settings.sync()
 
     def _load_settings(self) -> None:
-        self.repo_root_edit.setText(str(self.settings.value("repo_input", "")))
-        self.local_repo_edit.setText(str(self.settings.value("local_repo_path", "")))
         self.two_way_checkbox.setChecked(self._to_bool(self.settings.value("two_way", False)))
         self.delete_checkbox.setChecked(self._to_bool(self.settings.value("delete_stale", False)))
         self.periodic_check_checkbox.setChecked(self._to_bool(self.settings.value("periodic_check", False)))
         self.continuous_watch_checkbox.setChecked(self._to_bool(self.settings.value("continuous_watch", False)))
         self.interval_spinbox.setValue(int(self.settings.value("interval_seconds", 60)))
         self.auto_sync_on_change_checkbox.setChecked(self._to_bool(self.settings.value("auto_sync", False)))
-        self.auto_push_checkbox.setChecked(self._to_bool(self.settings.value("auto_push", False)))
+        self.auto_push_checkbox.setChecked(self._to_bool(self.settings.value("auto_push", True)))
         self.push_branch_edit.setText(str(self.settings.value("push_branch", "main")))
         self.commit_message_edit.setText(str(self.settings.value("commit_message", "Sync updates")))
         self.save_credentials_checkbox.setChecked(self._to_bool(self.settings.value("save_credentials", False)))
@@ -570,10 +560,12 @@ class MainWindow(QMainWindow):
 
         self.table.setRowCount(0)
         for pair in pairs:
-            self._add_row()
-            row = self.table.rowCount() - 1
-            self.table.setItem(row, 0, QTableWidgetItem(pair.get("source", "")))
-            self.table.setItem(row, 1, QTableWidgetItem(pair.get("target", "")))
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setCellWidget(row, 0, self._create_type_combo(pair.get("source_type", TYPE_PATH)))
+            self.table.setItem(row, 1, QTableWidgetItem(pair.get("source", "")))
+            self.table.setCellWidget(row, 2, self._create_type_combo(pair.get("target_type", TYPE_PATH)))
+            self.table.setItem(row, 3, QTableWidgetItem(pair.get("target", "")))
 
         encrypted_credentials = str(self.settings.value("credentials_encrypted", ""))
         if encrypted_credentials and self.save_credentials_checkbox.isChecked():
