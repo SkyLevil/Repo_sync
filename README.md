@@ -45,3 +45,6 @@ python sync_gui.py
 - Git metadata folders (`.git`) are excluded from file-sync operations to avoid corrupting repository internals.
 
 - Auto commit/push will create a commit each sync run (`--allow-empty`) so pushes are always visible on GitHub.
+
+- Repository targets are reset to `origin/<push-branch>` before each sync run to avoid stale local commits in cached clones.
+- Files larger than 95 MB are skipped during sync (GitHub hard limit is 100 MB; use Git LFS for large files).

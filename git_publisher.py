@@ -9,6 +9,16 @@ class GitPublisher:
     def __init__(self, logger: Callable[[str], None]):
         self._logger = logger
 
+    def prepare_repository(self, repo_path: Path, branch: str) -> None:
+        if not (repo_path / ".git").exists():
+            raise ValueError(f"'{repo_path}' is not a git repository (missing .git).")
+
+        self._ensure_branch(repo_path, branch)
+        self._run(["git", "-C", str(repo_path), "fetch", "origin", branch], f"Fetch origin/{branch}")
+        self._run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch}"], "Reset local branch")
+        self._run(["git", "-C", str(repo_path), "clean", "-fd"], "Clean untracked files")
+        self._logger(f"[INFO] Repository prepared at {repo_path} on branch {branch}.")
+
     def commit_and_push(self, repo_path: Path, branch: str, commit_message: str) -> bool:
         if not (repo_path / ".git").exists():
             raise ValueError(f"'{repo_path}' is not a git repository (missing .git).")
@@ -38,7 +48,6 @@ class GitPublisher:
         return True
 
     def _ensure_branch(self, repo_path: Path, branch: str) -> None:
-        # Create/switch to branch locally so push target is explicit and stable.
         checkout = subprocess.run(
             ["git", "-C", str(repo_path), "checkout", branch],
             capture_output=True,

@@ -7,6 +7,7 @@ from typing import Callable, List, Optional
 from sync_models import SyncPair
 
 ProgressCallback = Callable[[int, int, str], None]
+MAX_SYNC_FILE_BYTES = 95 * 1024 * 1024
 
 
 class SyncEngine:
@@ -29,14 +30,27 @@ class SyncEngine:
         if not source.exists() or not source.is_dir():
             return 1
 
-        src_files = sum(
-            1 for p in source.rglob("*") if p.is_file() and not self._is_git_metadata(p.relative_to(source))
-        )
+        src_files = 0
+        for p in source.rglob("*"):
+            if not p.is_file() or self._is_git_metadata(p.relative_to(source)):
+                continue
+            try:
+                if p.stat().st_size > MAX_SYNC_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
+            src_files += 1
         dst_files = 0
         if delete_stale and target.exists() and target.is_dir():
-            dst_files = sum(
-                1 for p in target.rglob("*") if p.is_file() and not self._is_git_metadata(p.relative_to(target))
-            )
+            for p in target.rglob("*"):
+                if not p.is_file() or self._is_git_metadata(p.relative_to(target)):
+                    continue
+                try:
+                    if p.stat().st_size > MAX_SYNC_FILE_BYTES:
+                        continue
+                except OSError:
+                    continue
+                dst_files += 1
         return max(src_files + dst_files, 1)
 
     def sync_pairs(
@@ -88,6 +102,19 @@ class SyncEngine:
 
             relative = src_file.relative_to(source)
             if self._is_git_metadata(relative):
+                continue
+
+            try:
+                src_size = src_file.stat().st_size
+            except OSError:
+                self._emit_progress(progress_callback, progress, f"Skipped unreadable {relative}")
+                continue
+
+            if src_size > MAX_SYNC_FILE_BYTES:
+                self._logger(
+                    f"  ! skipped large file (>95MB, use Git LFS): {relative} ({src_size} bytes)"
+                )
+                self._emit_progress(progress_callback, progress, f"Skipped large {relative}")
                 continue
 
             dst_file = target / relative

@@ -360,8 +360,13 @@ class MainWindow(QMainWindow):
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
 
         pairs, repo_targets = self._build_pairs(config, resolver)
-        for _, url in repo_targets:
+        unique_repo_targets = {}
+        for repo_path, url in repo_targets:
+            unique_repo_targets[str(repo_path)] = (repo_path, url)
             logger(f"[INFO] Active repository target: {url}")
+
+        for repo_path, _url in unique_repo_targets.values():
+            GitPublisher(logger).prepare_repository(repo_path, config["push_branch"])
 
         engine = SyncEngine(logger)
         engine.sync_pairs(
