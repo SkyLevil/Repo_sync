@@ -26,13 +26,12 @@ A desktop GUI to sync folders between:
 
 - Python 3.10+
 - PySide6
-- cryptography
 - Git (required when using a repository URL)
 
-Install dependencies:
+Install dependency:
 
 ```bash
-pip install PySide6 cryptography
+pip install PySide6
 ```
 
 ## Run
@@ -68,3 +67,4 @@ python sync_gui.py
 - Target folders are created automatically when missing.
 - Sync pairs and options are stored with QSettings.
 - Encrypted credentials are stored with a local key in `~/.repo_sync_gui/secret.key`.
+- The code is split across modules for readability (`main_window.py`, `repo_resolver.py`, `sync_engine.py`, `credential_store.py`, `sync_models.py`).
