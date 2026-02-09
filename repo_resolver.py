@@ -37,21 +37,28 @@ class RepoResolver:
 
         return repo_path
 
-    def get_remote_head(self, repo_url: str, username: str = "", password: str = "") -> str:
+    def get_remote_branch_head(
+        self,
+        repo_url: str,
+        branch: str = "main",
+        username: str = "",
+        password: str = "",
+    ) -> str:
         auth_url = self._build_authenticated_url(repo_url, username, password)
+        ref = f"refs/heads/{branch}"
         process = subprocess.run(
-            ["git", "ls-remote", auth_url, "HEAD"],
+            ["git", "ls-remote", auth_url, ref],
             capture_output=True,
             text=True,
             check=False,
             timeout=30,
         )
         if process.returncode != 0:
-            raise ValueError(f"Failed to query remote HEAD.\n{process.stderr.strip()}")
+            raise ValueError(f"Failed to query remote branch '{branch}'.\n{process.stderr.strip()}")
 
         line = process.stdout.strip().splitlines()[0] if process.stdout.strip() else ""
         if not line:
-            raise ValueError("Remote HEAD query returned no data.")
+            raise ValueError(f"Remote branch '{branch}' was not found.")
         return line.split()[0]
 
     def _clone_repo(self, repo_url: str, username: str = "", password: str = "") -> Path:

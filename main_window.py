@@ -29,6 +29,8 @@ from repo_resolver import RepoResolver
 from sync_engine import SyncEngine
 from sync_models import SyncPair
 
+REMOTE_WATCH_BRANCH = "main"
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -80,8 +82,11 @@ class MainWindow(QMainWindow):
         self.two_way_checkbox = QCheckBox("Two-way sync")
         self.delete_checkbox = QCheckBox("Delete stale files on destination")
 
-        self.periodic_check_checkbox = QCheckBox("Enable periodic change checks")
+        self.periodic_check_checkbox = QCheckBox("Enable auto update checks")
         self.periodic_check_checkbox.stateChanged.connect(self._update_timer_state)
+
+        self.continuous_watch_checkbox = QCheckBox("Continuous watch (ignore interval)")
+        self.continuous_watch_checkbox.stateChanged.connect(self._update_timer_state)
 
         self.interval_spinbox = QSpinBox()
         self.interval_spinbox.setRange(5, 86400)
@@ -89,7 +94,7 @@ class MainWindow(QMainWindow):
         self.interval_spinbox.setSuffix(" sec")
         self.interval_spinbox.valueChanged.connect(self._update_timer_state)
 
-        self.auto_sync_on_change_checkbox = QCheckBox("Auto sync when changes are detected")
+        self.auto_sync_on_change_checkbox = QCheckBox("Auto sync on new commit/change")
 
         sync_btn = QPushButton("Run sync now")
         sync_btn.clicked.connect(lambda: self._run_sync(show_error_dialog=True, clear_log=True))
@@ -133,6 +138,7 @@ class MainWindow(QMainWindow):
 
         watcher_row = QHBoxLayout()
         watcher_row.addWidget(self.periodic_check_checkbox)
+        watcher_row.addWidget(self.continuous_watch_checkbox)
         watcher_row.addWidget(QLabel("Check interval"))
         watcher_row.addWidget(self.interval_spinbox)
         watcher_row.addWidget(self.auto_sync_on_change_checkbox)
@@ -147,6 +153,7 @@ class MainWindow(QMainWindow):
         self.repo_resolver = RepoResolver(self._append_log)
 
         self.check_timer = QTimer(self)
+        self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self._on_periodic_check)
 
         self._load_settings()
@@ -160,6 +167,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802
         self._save_settings()
         self.repo_resolver.cleanup()
+        self.check_timer.stop()
         super().closeEvent(event)
 
     def _set_status(self, text: str) -> None:
@@ -261,7 +269,7 @@ class MainWindow(QMainWindow):
                 two_way=self.two_way_checkbox.isChecked(),
                 delete_stale=self.delete_checkbox.isChecked(),
             )
-            self.last_state_hash = self._calculate_state_hash(pairs)
+            self.last_state_hash = self._current_state_value(pairs)
             self._append_log("[SUCCESS] Sync finished.")
             self._save_settings()
             self._set_status("Idle")
@@ -273,39 +281,51 @@ class MainWindow(QMainWindow):
             self._set_status("Idle")
             return False
 
-    def _update_timer_state(self) -> None:
-        self.interval_spinbox.setEnabled(self.periodic_check_checkbox.isChecked())
-
+    def _schedule_next_check(self) -> None:
         if not self.periodic_check_checkbox.isChecked():
-            self.check_timer.stop()
+            return
+
+        if self.continuous_watch_checkbox.isChecked():
+            self.check_timer.start(1000)
+        else:
+            self.check_timer.start(self.interval_spinbox.value() * 1000)
+
+    def _update_timer_state(self) -> None:
+        self.interval_spinbox.setEnabled(
+            self.periodic_check_checkbox.isChecked() and not self.continuous_watch_checkbox.isChecked()
+        )
+
+        self.check_timer.stop()
+        if not self.periodic_check_checkbox.isChecked():
             self._set_status("Idle")
             return
 
-        self.check_timer.start(self.interval_spinbox.value() * 1000)
+        mode = "continuous" if self.continuous_watch_checkbox.isChecked() else "interval"
         self._append_log(
-            f"[INFO] Periodic checks active (every {self.interval_spinbox.value()} seconds)."
+            f"[INFO] Auto update checks active ({mode}, branch '{REMOTE_WATCH_BRANCH}')."
         )
-        self._set_status("Watching for changes...")
+        self._set_status("Watching for new commits/changes...")
+        self._schedule_next_check()
 
     def _on_periodic_check(self) -> None:
         if self.check_in_progress:
             self._append_log("[INFO] Previous check still running, skipping this cycle.")
+            self._schedule_next_check()
             return
 
         self.check_in_progress = True
-        self._set_status("Checking for changes...")
+        self._set_status("Checking for new commits/changes...")
 
         try:
             changed, new_state = self._detect_changes()
 
             if not self.last_state_hash:
                 self.last_state_hash = new_state
-                self._append_log("[INFO] Baseline captured for auto-sync checks.")
-                self._set_status("Watching for changes...")
-                return
-
-            if changed:
-                self._append_log("[INFO] Change detected in source repository/folders.")
+                self._append_log(
+                    f"[INFO] Baseline captured for auto-sync checks (branch '{REMOTE_WATCH_BRANCH}')."
+                )
+            elif changed:
+                self._append_log("[INFO] New commit/change detected.")
                 self.last_state_hash = new_state
                 if self.auto_sync_on_change_checkbox.isChecked():
                     self._append_log("[INFO] Auto-sync is running now...")
@@ -318,14 +338,15 @@ class MainWindow(QMainWindow):
                 else:
                     self._append_log("[INFO] Auto-sync is disabled; no sync executed.")
             else:
-                self._append_log("[INFO] No changes detected.")
+                self._append_log("[INFO] No new commits/changes detected.")
 
-            self._set_status("Watching for changes...")
+            self._set_status("Watching for new commits/changes...")
         except Exception as exc:
             self._append_log(f"[WARN] Periodic check failed: {exc}")
-            self._set_status("Watching for changes...")
+            self._set_status("Watching for new commits/changes...")
         finally:
             self.check_in_progress = False
+            self._schedule_next_check()
 
     def _detect_changes(self) -> tuple[bool, str]:
         repo_input = self.repo_root_edit.text().strip()
@@ -333,13 +354,29 @@ class MainWindow(QMainWindow):
         password = self.password_edit.text().strip()
 
         if repo_input and RepoResolver.is_repo_url(repo_input):
-            remote_head = self.repo_resolver.get_remote_head(repo_input, username=username, password=password)
+            remote_head = self.repo_resolver.get_remote_branch_head(
+                repo_input,
+                branch=REMOTE_WATCH_BRANCH,
+                username=username,
+                password=password,
+            )
             return (self.last_state_hash != "" and remote_head != self.last_state_hash), remote_head
 
         self.repo_resolver.cleanup()
         pairs = self._collect_pairs()
         current_hash = self._calculate_state_hash(pairs)
         return (self.last_state_hash != "" and current_hash != self.last_state_hash), current_hash
+
+    def _current_state_value(self, pairs: List[SyncPair]) -> str:
+        repo_input = self.repo_root_edit.text().strip()
+        if repo_input and RepoResolver.is_repo_url(repo_input):
+            return self.repo_resolver.get_remote_branch_head(
+                repo_input,
+                branch=REMOTE_WATCH_BRANCH,
+                username=self.username_edit.text().strip(),
+                password=self.password_edit.text().strip(),
+            )
+        return self._calculate_state_hash(pairs)
 
     @staticmethod
     def _calculate_state_hash(pairs: List[SyncPair]) -> str:
@@ -360,6 +397,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("two_way", self.two_way_checkbox.isChecked())
         self.settings.setValue("delete_stale", self.delete_checkbox.isChecked())
         self.settings.setValue("periodic_check", self.periodic_check_checkbox.isChecked())
+        self.settings.setValue("continuous_watch", self.continuous_watch_checkbox.isChecked())
         self.settings.setValue("interval_seconds", self.interval_spinbox.value())
         self.settings.setValue("auto_sync", self.auto_sync_on_change_checkbox.isChecked())
         self.settings.setValue("save_credentials", self.save_credentials_checkbox.isChecked())
@@ -392,6 +430,7 @@ class MainWindow(QMainWindow):
         self.two_way_checkbox.setChecked(self._to_bool(self.settings.value("two_way", False)))
         self.delete_checkbox.setChecked(self._to_bool(self.settings.value("delete_stale", False)))
         self.periodic_check_checkbox.setChecked(self._to_bool(self.settings.value("periodic_check", False)))
+        self.continuous_watch_checkbox.setChecked(self._to_bool(self.settings.value("continuous_watch", False)))
         self.interval_spinbox.setValue(int(self.settings.value("interval_seconds", 60)))
         self.auto_sync_on_change_checkbox.setChecked(self._to_bool(self.settings.value("auto_sync", False)))
         self.save_credentials_checkbox.setChecked(self._to_bool(self.settings.value("save_credentials", False)))

@@ -16,9 +16,11 @@ A desktop GUI to sync folders between:
   - local repo folder -> Windows folder
 - Optional one-way or two-way sync.
 - Optional stale-file cleanup on destination.
-- Optional periodic change checks.
-- Optional auto-sync when source changes are detected.
-- Visible status indicator (`Idle`, `Watching for changes...`, `Checking for changes...`, `Auto-sync in progress...`).
+- Optional auto update checks.
+- Optional **continuous watch mode** (checks permanently without using interval).
+- Optional auto-sync on new commit/change.
+- Repository URL watch mode tracks **`main` branch commits** (`refs/heads/main`).
+- Visible status indicator (`Idle`, `Watching...`, `Checking...`, `Auto-sync in progress...`).
 - Optional login with username/password for repository URLs.
 - Optional encrypted credential storage.
 - Persisted sync pair configuration across restarts.
@@ -43,8 +45,9 @@ python sync_gui.py
 
 ## Notes
 
-- Periodic checks for repository URLs use `git ls-remote` to detect remote HEAD changes.
-- Auto-sync runs only when a change is detected and the auto-sync checkbox is enabled.
+- Auto-update on repository URLs checks `refs/heads/main` with `git ls-remote`.
+- If a new commit appears on `main`, auto-sync runs immediately (when enabled).
+- Continuous watch mode ignores interval and checks continuously in short cycles.
 - If repo input is a URL, the repo is cloned to a temporary folder for sync execution.
 - Relative source/target paths require a repo root or repo URL.
 - Target folders are created automatically when missing.
