@@ -43,3 +43,5 @@ python sync_gui.py
 - Path picker buttons work only for rows where endpoint type is `Path`.
 
 - Git metadata folders (`.git`) are excluded from file-sync operations to avoid corrupting repository internals.
+
+- Auto commit/push will create a commit each sync run (`--allow-empty`) so pushes are always visible on GitHub.
