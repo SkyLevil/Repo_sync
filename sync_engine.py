@@ -13,6 +13,10 @@ class SyncEngine:
     def __init__(self, logger: Callable[[str], None]):
         self._logger = logger
 
+    @staticmethod
+    def _is_git_metadata(relative_path: Path) -> bool:
+        return ".git" in relative_path.parts
+
     def count_total_work_items(self, pairs: List[SyncPair], two_way: bool, delete_stale: bool) -> int:
         total = 0
         for pair in pairs:
@@ -25,10 +29,14 @@ class SyncEngine:
         if not source.exists() or not source.is_dir():
             return 1
 
-        src_files = sum(1 for p in source.rglob("*") if p.is_file())
+        src_files = sum(
+            1 for p in source.rglob("*") if p.is_file() and not self._is_git_metadata(p.relative_to(source))
+        )
         dst_files = 0
         if delete_stale and target.exists() and target.is_dir():
-            dst_files = sum(1 for p in target.rglob("*") if p.is_file())
+            dst_files = sum(
+                1 for p in target.rglob("*") if p.is_file() and not self._is_git_metadata(p.relative_to(target))
+            )
         return max(src_files + dst_files, 1)
 
     def sync_pairs(
@@ -79,6 +87,9 @@ class SyncEngine:
                 continue
 
             relative = src_file.relative_to(source)
+            if self._is_git_metadata(relative):
+                continue
+
             dst_file = target / relative
             dst_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -108,6 +119,9 @@ class SyncEngine:
                     continue
 
                 relative = dst_file.relative_to(target)
+                if self._is_git_metadata(relative):
+                    continue
+
                 src_file = source / relative
                 if not src_file.exists():
                     dst_file.unlink()

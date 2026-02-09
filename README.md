@@ -41,3 +41,5 @@ python sync_gui.py
 - For `Repository URL` entries, the app resolves and maintains a local clone internally.
 - The source/target selection now happens per row via endpoint type dropdowns.
 - Path picker buttons work only for rows where endpoint type is `Path`.
+
+- Git metadata folders (`.git`) are excluded from file-sync operations to avoid corrupting repository internals.
