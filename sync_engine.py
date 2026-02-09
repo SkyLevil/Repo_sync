@@ -25,10 +25,10 @@ class SyncEngine:
         if not source.exists() or not source.is_dir():
             return 1
 
-        src_files = sum(1 for p in source.rglob("*") if p.is_file())
+        src_files = sum(1 for p in source.rglob("*") if p.is_file() and not self._should_skip(p.relative_to(source)))
         dst_files = 0
         if delete_stale and target.exists() and target.is_dir():
-            dst_files = sum(1 for p in target.rglob("*") if p.is_file())
+            dst_files = sum(1 for p in target.rglob("*") if p.is_file() and not self._should_skip(p.relative_to(target)))
         return max(src_files + dst_files, 1)
 
     def sync_pairs(
@@ -79,6 +79,12 @@ class SyncEngine:
                 continue
 
             relative = src_file.relative_to(source)
+
+            # Skip .git directory to avoid overwriting git metadata
+            if self._should_skip(relative):
+                self._emit_progress(progress_callback, progress, f"Skipped {relative}")
+                continue
+
             dst_file = target / relative
             dst_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -108,6 +114,12 @@ class SyncEngine:
                     continue
 
                 relative = dst_file.relative_to(target)
+
+                # Skip .git directory when removing stale files
+                if self._should_skip(relative):
+                    self._emit_progress(progress_callback, progress, f"Validated {relative}")
+                    continue
+
                 src_file = source / relative
                 if not src_file.exists():
                     dst_file.unlink()
@@ -126,3 +138,10 @@ class SyncEngine:
         progress["done"] += 1
         if progress_callback:
             progress_callback(progress["done"], progress["total"], message)
+
+    @staticmethod
+    def _should_skip(relative_path: Path) -> bool:
+        """Check if a file should be skipped during sync (e.g., .git directories)."""
+        parts = relative_path.parts
+        # Skip files inside .git directory
+        return ".git" in parts
