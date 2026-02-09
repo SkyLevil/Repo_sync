@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
 
         self.last_state_hash = ""
         self.check_in_progress = False
+        self.current_repo_base: Optional[Path] = None
 
         self.repo_root_edit = QLineEdit()
         self.repo_root_edit.setPlaceholderText(
@@ -165,7 +166,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log)
 
         self.engine = SyncEngine(self._append_log)
-        self.repo_resolver = RepoResolver(self._append_log)
+        self.repo_resolver = RepoResolver(self._append_log, cache_dir=self.app_data_dir / "repo_cache")
         self.git_publisher = GitPublisher(self._append_log)
 
         self.check_timer = QTimer(self)
@@ -234,6 +235,8 @@ class MainWindow(QMainWindow):
             username=self.username_edit.text().strip(),
             password=self.password_edit.text().strip(),
         )
+
+        self.current_repo_base = repo_base
 
         pairs: List[SyncPair] = []
         for row in range(self.table.rowCount()):
@@ -308,11 +311,17 @@ class MainWindow(QMainWindow):
         if not repo_text:
             self._append_log("[WARN] Auto push skipped: repo root is empty.")
             return
-        if RepoResolver.is_repo_url(repo_text):
-            self._append_log("[WARN] Auto push skipped: repo URL uses a temporary clone. Use a local git repo path.")
-            return
 
-        repo_path = Path(repo_text)
+        repo_path = self.current_repo_base
+        if repo_path is None:
+            repo_path = self.repo_resolver.resolve(
+                repo_text,
+                username=self.username_edit.text().strip(),
+                password=self.password_edit.text().strip(),
+            )
+        if repo_path is None:
+            self._append_log("[WARN] Auto push skipped: could not resolve repository path.")
+            return
         branch = self.push_branch_edit.text().strip() or "main"
         commit_message = self.commit_message_edit.text().strip() or "Sync updates"
 

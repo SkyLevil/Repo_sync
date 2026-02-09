@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
 
 
 class RepoResolver:
-    def __init__(self, logger: Callable[[str], None]):
+    def __init__(self, logger: Callable[[str], None], cache_dir: Optional[Path] = None):
         self._logger = logger
-        self._temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
+        self._cache_dir = cache_dir or (Path.home() / ".repo_sync_gui" / "repo_cache")
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def is_repo_url(value: str) -> bool:
@@ -29,7 +30,7 @@ class RepoResolver:
             return None
 
         if self.is_repo_url(repo_input):
-            return self._clone_repo(repo_input, username=username, password=password)
+            return self._ensure_local_clone(repo_input, username=username, password=password)
 
         repo_path = Path(repo_input)
         if not repo_path.exists() or not repo_path.is_dir():
@@ -44,45 +45,55 @@ class RepoResolver:
         username: str = "",
         password: str = "",
     ) -> str:
-        auth_url = self._build_authenticated_url(repo_url, username, password)
-        ref = f"refs/heads/{branch}"
+        repo_path = self._ensure_local_clone(repo_url, username=username, password=password)
+        self._update_clone(repo_path)
         process = subprocess.run(
-            ["git", "ls-remote", auth_url, ref],
+            ["git", "-C", str(repo_path), "rev-parse", f"origin/{branch}"],
             capture_output=True,
             text=True,
             check=False,
-            timeout=30,
+            timeout=60,
         )
         if process.returncode != 0:
-            raise ValueError(f"Failed to query remote branch '{branch}'.\n{process.stderr.strip()}")
+            raise ValueError(f"Failed to resolve origin/{branch}.\n{process.stderr.strip() or process.stdout.strip()}")
+        return process.stdout.strip()
 
-        line = process.stdout.strip().splitlines()[0] if process.stdout.strip() else ""
-        if not line:
-            raise ValueError(f"Remote branch '{branch}' was not found.")
-        return line.split()[0]
-
-    def _clone_repo(self, repo_url: str, username: str = "", password: str = "") -> Path:
-        self.cleanup()
-        self._temp_dir = tempfile.TemporaryDirectory(prefix="repo_sync_")
-        clone_target = Path(self._temp_dir.name) / "repo"
-
+    def _ensure_local_clone(self, repo_url: str, username: str = "", password: str = "") -> Path:
         auth_url = self._build_authenticated_url(repo_url, username, password)
+        clone_target = self._cache_dir / self._url_hash(repo_url)
 
-        self._logger(f"[INFO] Cloning repository: {repo_url}")
+        if (clone_target / ".git").exists():
+            self._update_clone(clone_target)
+            return clone_target
+
+        self._logger(f"[INFO] Creating local cached clone: {repo_url}")
         process = subprocess.run(
             ["git", "clone", "--depth", "1", auth_url, str(clone_target)],
             capture_output=True,
             text=True,
             check=False,
-            timeout=120,
+            timeout=180,
         )
-
         if process.returncode != 0:
-            self.cleanup()
             raise ValueError(f"Failed to clone repository URL.\n{process.stderr.strip()}")
 
-        self._logger(f"[INFO] Repository cloned to temporary path: {clone_target}")
+        self._logger(f"[INFO] Repository cached at: {clone_target}")
         return clone_target
+
+    def _update_clone(self, repo_path: Path) -> None:
+        process = subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "--depth", "1", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if process.returncode != 0:
+            raise ValueError(f"Failed to update cached repository.\n{process.stderr.strip() or process.stdout.strip()}")
+
+    @staticmethod
+    def _url_hash(value: str) -> str:
+        return hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _build_authenticated_url(repo_url: str, username: str, password: str) -> str:
@@ -109,6 +120,5 @@ class RepoResolver:
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
     def cleanup(self) -> None:
-        if self._temp_dir is not None:
-            self._temp_dir.cleanup()
-            self._temp_dir = None
+        # persistent cache mode: nothing to clean up
+        return
