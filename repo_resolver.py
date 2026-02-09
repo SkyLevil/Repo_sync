@@ -24,13 +24,24 @@ class RepoResolver:
             or value_lower.endswith(".git")
         )
 
-    def resolve(self, repo_input: str, username: str = "", password: str = "") -> Optional[Path]:
+    def resolve(
+        self,
+        repo_input: str,
+        username: str = "",
+        password: str = "",
+        local_repo_path: str = "",
+    ) -> Optional[Path]:
         repo_input = repo_input.strip()
         if not repo_input:
             return None
 
         if self.is_repo_url(repo_input):
-            return self._ensure_local_clone(repo_input, username=username, password=password)
+            return self._ensure_local_clone(
+                repo_input,
+                username=username,
+                password=password,
+                local_repo_path=local_repo_path,
+            )
 
         repo_path = Path(repo_input)
         if not repo_path.exists() or not repo_path.is_dir():
@@ -44,8 +55,14 @@ class RepoResolver:
         branch: str = "main",
         username: str = "",
         password: str = "",
+        local_repo_path: str = "",
     ) -> str:
-        repo_path = self._ensure_local_clone(repo_url, username=username, password=password)
+        repo_path = self._ensure_local_clone(
+            repo_url,
+            username=username,
+            password=password,
+            local_repo_path=local_repo_path,
+        )
         self._update_clone(repo_path)
         process = subprocess.run(
             ["git", "-C", str(repo_path), "rev-parse", f"origin/{branch}"],
@@ -58,15 +75,29 @@ class RepoResolver:
             raise ValueError(f"Failed to resolve origin/{branch}.\n{process.stderr.strip() or process.stdout.strip()}")
         return process.stdout.strip()
 
-    def _ensure_local_clone(self, repo_url: str, username: str = "", password: str = "") -> Path:
+    def _ensure_local_clone(
+        self,
+        repo_url: str,
+        username: str = "",
+        password: str = "",
+        local_repo_path: str = "",
+    ) -> Path:
         auth_url = self._build_authenticated_url(repo_url, username, password)
-        clone_target = self._cache_dir / self._url_hash(repo_url)
+        clone_target = self._resolve_clone_target(repo_url, local_repo_path)
 
         if (clone_target / ".git").exists():
             self._update_clone(clone_target)
             return clone_target
 
-        self._logger(f"[INFO] Creating local cached clone: {repo_url}")
+        if clone_target.exists() and any(clone_target.iterdir()):
+            raise ValueError(
+                f"Local repo path exists and is not a git repo: {clone_target}. "
+                "Please choose an empty folder or an existing git clone."
+            )
+
+        clone_target.parent.mkdir(parents=True, exist_ok=True)
+
+        self._logger(f"[INFO] Creating local clone: {repo_url} -> {clone_target}")
         process = subprocess.run(
             ["git", "clone", "--depth", "1", auth_url, str(clone_target)],
             capture_output=True,
@@ -77,8 +108,13 @@ class RepoResolver:
         if process.returncode != 0:
             raise ValueError(f"Failed to clone repository URL.\n{process.stderr.strip()}")
 
-        self._logger(f"[INFO] Repository cached at: {clone_target}")
+        self._logger(f"[INFO] Repository ready at: {clone_target}")
         return clone_target
+
+    def _resolve_clone_target(self, repo_url: str, local_repo_path: str) -> Path:
+        if local_repo_path.strip():
+            return Path(local_repo_path.strip())
+        return self._cache_dir / self._url_hash(repo_url)
 
     def _update_clone(self, repo_path: Path) -> None:
         process = subprocess.run(
@@ -89,7 +125,7 @@ class RepoResolver:
             timeout=120,
         )
         if process.returncode != 0:
-            raise ValueError(f"Failed to update cached repository.\n{process.stderr.strip() or process.stdout.strip()}")
+            raise ValueError(f"Failed to update local repository.\n{process.stderr.strip() or process.stdout.strip()}")
 
     @staticmethod
     def _url_hash(value: str) -> str:
@@ -120,5 +156,4 @@ class RepoResolver:
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
     def cleanup(self) -> None:
-        # persistent cache mode: nothing to clean up
         return

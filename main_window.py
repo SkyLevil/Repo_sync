@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Folder Sync (Repo URL / Local / Windows)")
-        self.resize(1050, 760)
+        self.resize(1050, 790)
 
         self.settings = QSettings("RepoSync", "FolderSyncGui")
         self.app_data_dir = Path.home() / ".repo_sync_gui"
@@ -78,9 +78,13 @@ class MainWindow(QMainWindow):
         self.repo_root_edit.setPlaceholderText(
             "Optional: Local repo root path or repository URL (https://..., git@..., ...)."
         )
-
         browse_repo_btn = QPushButton("Browse")
         browse_repo_btn.clicked.connect(self._pick_repo_root)
+
+        self.local_repo_edit = QLineEdit()
+        self.local_repo_edit.setPlaceholderText("Optional: local repository workspace path for URL repos")
+        browse_local_repo_btn = QPushButton("Browse local repo")
+        browse_local_repo_btn.clicked.connect(self._pick_local_repo_root)
 
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Optional repository username")
@@ -98,13 +102,10 @@ class MainWindow(QMainWindow):
 
         add_row_btn = QPushButton("Add sync pair")
         add_row_btn.clicked.connect(self._add_row)
-
         remove_row_btn = QPushButton("Remove selected pair")
         remove_row_btn.clicked.connect(self._remove_selected_rows)
-
         browse_source_btn = QPushButton("Choose source for selected row")
         browse_source_btn.clicked.connect(self._pick_source_for_selected)
-
         browse_target_btn = QPushButton("Choose target for selected row")
         browse_target_btn.clicked.connect(self._pick_target_for_selected)
 
@@ -113,7 +114,6 @@ class MainWindow(QMainWindow):
 
         self.periodic_check_checkbox = QCheckBox("Enable auto update checks")
         self.periodic_check_checkbox.stateChanged.connect(self._update_timer_state)
-
         self.continuous_watch_checkbox = QCheckBox("Continuous watch (ignore interval)")
         self.continuous_watch_checkbox.stateChanged.connect(self._update_timer_state)
 
@@ -145,18 +145,20 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         self.setCentralWidget(root)
-
         layout = QVBoxLayout(root)
 
         top_grid = QGridLayout()
         top_grid.addWidget(QLabel("Repo root / Repo URL (optional)"), 0, 0)
         top_grid.addWidget(self.repo_root_edit, 0, 1)
         top_grid.addWidget(browse_repo_btn, 0, 2)
-        top_grid.addWidget(QLabel("Username"), 1, 0)
-        top_grid.addWidget(self.username_edit, 1, 1, 1, 2)
-        top_grid.addWidget(QLabel("Password / Token"), 2, 0)
-        top_grid.addWidget(self.password_edit, 2, 1, 1, 2)
-        top_grid.addWidget(self.save_credentials_checkbox, 3, 1, 1, 2)
+        top_grid.addWidget(QLabel("Local repo workspace (for URL, optional)"), 1, 0)
+        top_grid.addWidget(self.local_repo_edit, 1, 1)
+        top_grid.addWidget(browse_local_repo_btn, 1, 2)
+        top_grid.addWidget(QLabel("Username"), 2, 0)
+        top_grid.addWidget(self.username_edit, 2, 1, 1, 2)
+        top_grid.addWidget(QLabel("Password / Token"), 3, 0)
+        top_grid.addWidget(self.password_edit, 3, 1, 1, 2)
+        top_grid.addWidget(self.save_credentials_checkbox, 4, 1, 1, 2)
         layout.addLayout(top_grid)
 
         layout.addWidget(self.table)
@@ -226,6 +228,11 @@ class MainWindow(QMainWindow):
         if selected:
             self.repo_root_edit.setText(selected)
 
+    def _pick_local_repo_root(self) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Select local repository workspace")
+        if selected:
+            self.local_repo_edit.setText(selected)
+
     def _add_row(self) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
@@ -242,7 +249,6 @@ class MainWindow(QMainWindow):
         if row < 0:
             QMessageBox.information(self, "Selection required", "Please select a row first.")
             return
-
         selected = QFileDialog.getExistingDirectory(self, "Select source folder")
         if selected:
             self.table.setItem(row, 0, QTableWidgetItem(selected))
@@ -252,7 +258,6 @@ class MainWindow(QMainWindow):
         if row < 0:
             QMessageBox.information(self, "Selection required", "Please select a row first.")
             return
-
         selected = QFileDialog.getExistingDirectory(self, "Select target folder")
         if selected:
             self.table.setItem(row, 1, QTableWidgetItem(selected))
@@ -262,15 +267,14 @@ class MainWindow(QMainWindow):
         for row in range(self.table.rowCount()):
             src_item = self.table.item(row, 0)
             dst_item = self.table.item(row, 1)
-            pairs.append(
-                {
-                    "source": src_item.text().strip() if src_item else "",
-                    "target": dst_item.text().strip() if dst_item else "",
-                }
-            )
+            pairs.append({
+                "source": src_item.text().strip() if src_item else "",
+                "target": dst_item.text().strip() if dst_item else "",
+            })
 
         return {
             "repo_input": self.repo_root_edit.text().strip(),
+            "local_repo_path": self.local_repo_edit.text().strip(),
             "username": self.username_edit.text().strip(),
             "password": self.password_edit.text().strip(),
             "pairs": pairs,
@@ -285,23 +289,31 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _build_pairs(config: dict, repo_base: Optional[Path]) -> List[SyncPair]:
+        if RepoResolver.is_repo_url(config.get("repo_input", "")) and not config.get("local_repo_path", "").strip():
+            for idx, pair in enumerate(config["pairs"], start=1):
+                src = pair.get("source", "").strip()
+                dst = pair.get("target", "").strip()
+                if not src and not dst:
+                    continue
+                if (src and not Path(src).is_absolute()) or (dst and not Path(dst).is_absolute()):
+                    raise ValueError(
+                        f"Row {idx}: Relative paths with repo URL require 'Local repo workspace'. "
+                        "Please set a local repo workspace path."
+                    )
+
         pairs: List[SyncPair] = []
         for idx, pair in enumerate(config["pairs"], start=1):
             source_text = pair.get("source", "").strip()
             target_text = pair.get("target", "").strip()
-
             if not source_text and not target_text:
                 continue
             if not source_text or not target_text:
                 raise ValueError(f"Row {idx}: both columns are required.")
-
             source_path = MainWindow._resolve_pair_path(source_text, repo_base, idx, "source")
             target_path = MainWindow._resolve_pair_path(target_text, repo_base, idx, "target")
             pairs.append(SyncPair(source=source_path, target=target_path))
-
         if not pairs:
             raise ValueError("Please define at least one sync pair.")
-
         return pairs
 
     @staticmethod
@@ -322,7 +334,9 @@ class MainWindow(QMainWindow):
 
         if clear_log:
             self.log.clear()
+
         self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("0%")
         self._set_status("Syncing in background...")
         self.sync_in_progress = True
 
@@ -342,8 +356,15 @@ class MainWindow(QMainWindow):
     def _sync_job(self, config: dict, signals: WorkerSignals) -> dict:
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
-        repo_base = resolver.resolve(config["repo_input"], config["username"], config["password"])
+        repo_base = resolver.resolve(
+            config["repo_input"],
+            config["username"],
+            config["password"],
+            config.get("local_repo_path", ""),
+        )
         pairs = self._build_pairs(config, repo_base)
+        if repo_base is not None:
+            logger(f"[INFO] Active repository path: {repo_base}")
 
         engine = SyncEngine(logger)
         engine.sync_pairs(
@@ -357,7 +378,7 @@ class MainWindow(QMainWindow):
             if repo_base is None:
                 logger("[WARN] Auto push skipped: repo path unresolved.")
             else:
-                logger("[INFO] Auto commit/push started...")
+                logger(f"[INFO] Auto commit/push started on {repo_base}...")
                 GitPublisher(logger).commit_and_push(repo_base, config["push_branch"], config["commit_message"])
 
         new_state = self._compute_state_value(config, pairs, resolver)
@@ -382,7 +403,10 @@ class MainWindow(QMainWindow):
     def _schedule_next_check(self) -> None:
         if not self.periodic_check_checkbox.isChecked():
             return
-        self.check_timer.start(1000 if self.continuous_watch_checkbox.isChecked() else self.interval_spinbox.value() * 1000)
+        if self.continuous_watch_checkbox.isChecked():
+            self.check_timer.start(1000)
+        else:
+            self.check_timer.start(self.interval_spinbox.value() * 1000)
 
     def _update_timer_state(self) -> None:
         self.interval_spinbox.setEnabled(
@@ -423,9 +447,15 @@ class MainWindow(QMainWindow):
                 branch=REMOTE_WATCH_BRANCH,
                 username=config["username"],
                 password=config["password"],
+                local_repo_path=config.get("local_repo_path", ""),
             )
         else:
-            repo_base = resolver.resolve(config["repo_input"], config["username"], config["password"])
+            repo_base = resolver.resolve(
+                config["repo_input"],
+                config["username"],
+                config["password"],
+                config.get("local_repo_path", ""),
+            )
             pairs = self._build_pairs(config, repo_base)
             new_state = self._calculate_state_hash(pairs)
 
@@ -463,6 +493,7 @@ class MainWindow(QMainWindow):
                 branch=REMOTE_WATCH_BRANCH,
                 username=config["username"],
                 password=config["password"],
+                local_repo_path=config.get("local_repo_path", ""),
             )
         return self._calculate_state_hash(pairs)
 
@@ -482,6 +513,7 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self) -> None:
         self.settings.setValue("repo_input", self.repo_root_edit.text())
+        self.settings.setValue("local_repo_path", self.local_repo_edit.text())
         self.settings.setValue("two_way", self.two_way_checkbox.isChecked())
         self.settings.setValue("delete_stale", self.delete_checkbox.isChecked())
         self.settings.setValue("periodic_check", self.periodic_check_checkbox.isChecked())
@@ -518,6 +550,7 @@ class MainWindow(QMainWindow):
 
     def _load_settings(self) -> None:
         self.repo_root_edit.setText(str(self.settings.value("repo_input", "")))
+        self.local_repo_edit.setText(str(self.settings.value("local_repo_path", "")))
         self.two_way_checkbox.setChecked(self._to_bool(self.settings.value("two_way", False)))
         self.delete_checkbox.setChecked(self._to_bool(self.settings.value("delete_stale", False)))
         self.periodic_check_checkbox.setChecked(self._to_bool(self.settings.value("periodic_check", False)))

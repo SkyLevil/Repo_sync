@@ -43,8 +43,9 @@ python sync_gui.py
 
 ## Notes
 
-- Repository URLs are cloned into a persistent local cache under `~/.repo_sync_gui/repo_cache`.
+- For URL repos with relative source/target paths, **Local repo workspace** is required (otherwise sync is blocked).
+- If **Local repo workspace** is empty, a cache path under `~/.repo_sync_gui/repo_cache` is used.
 - Auto-update on repository URLs checks `refs/heads/main`.
 - If a new commit appears on `main`, auto-sync runs immediately (when enabled).
 - Continuous watch mode ignores interval and checks continuously in short cycles.
-- Auto commit/push uses the resolved local git repository (local path or cached clone).
+- Auto commit/push uses the resolved local git repository (workspace path or cache clone).
