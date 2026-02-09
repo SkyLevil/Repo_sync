@@ -3,7 +3,7 @@
 A desktop GUI to sync folders between:
 
 - a local repository folder,
-- a repository URL (cloned temporarily),
+- a repository URL (cloned temporarily for sync),
 - and Windows/local folders.
 
 ## Features
@@ -18,6 +18,7 @@ A desktop GUI to sync folders between:
 - Optional stale-file cleanup on destination.
 - Optional periodic change checks.
 - Optional auto-sync when source changes are detected.
+- Visible status indicator (`Idle`, `Watching for changes...`, `Checking for changes...`, `Auto-sync in progress...`).
 - Optional login with username/password for repository URLs.
 - Optional encrypted credential storage.
 - Persisted sync pair configuration across restarts.
@@ -40,29 +41,11 @@ pip install PySide6
 python sync_gui.py
 ```
 
-## Usage
-
-1. (Optional) Enter **Repo root / Repo URL**:
-   - local path, e.g. `C:\projects\myrepo`
-   - URL, e.g. `https://github.com/org/repo.git`
-2. (Optional) Enter repository **Username** and **Password/Token**.
-3. Enable **Save credentials encrypted** if credentials should persist.
-4. Add sync pairs:
-   - **Source folder**
-   - **Target folder**
-5. Path rules:
-   - Absolute path: used directly (good for Windows/Windows sync)
-   - Relative path: resolved against repo root/URL clone
-6. Optional settings:
-   - **Two-way sync**
-   - **Delete stale files on destination**
-   - **Enable periodic change checks** + interval
-   - **Auto sync when changes are detected**
-7. Click **Run sync now**.
-
 ## Notes
 
-- If repo input is a URL, the repo is cloned to a temporary folder for each sync/check run.
+- Periodic checks for repository URLs use `git ls-remote` to detect remote HEAD changes.
+- Auto-sync runs only when a change is detected and the auto-sync checkbox is enabled.
+- If repo input is a URL, the repo is cloned to a temporary folder for sync execution.
 - Relative source/target paths require a repo root or repo URL.
 - Target folders are created automatically when missing.
 - Sync pairs and options are stored with QSettings.

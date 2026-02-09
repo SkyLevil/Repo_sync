@@ -12,8 +12,8 @@ class RepoResolver:
         self._temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
 
     @staticmethod
-    def _looks_like_url(value: str) -> bool:
-        value_lower = value.lower()
+    def is_repo_url(value: str) -> bool:
+        value_lower = value.lower().strip()
         return (
             value_lower.startswith("http://")
             or value_lower.startswith("https://")
@@ -27,7 +27,7 @@ class RepoResolver:
         if not repo_input:
             return None
 
-        if self._looks_like_url(repo_input):
+        if self.is_repo_url(repo_input):
             return self._clone_repo(repo_input, username=username, password=password)
 
         repo_path = Path(repo_input)
@@ -35,6 +35,23 @@ class RepoResolver:
             raise ValueError("Repo root path does not exist or is not a folder.")
 
         return repo_path
+
+    def get_remote_head(self, repo_url: str, username: str = "", password: str = "") -> str:
+        auth_url = self._build_authenticated_url(repo_url, username, password)
+        process = subprocess.run(
+            ["git", "ls-remote", auth_url, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if process.returncode != 0:
+            raise ValueError(f"Failed to query remote HEAD.\n{process.stderr.strip()}")
+
+        line = process.stdout.strip().splitlines()[0] if process.stdout.strip() else ""
+        if not line:
+            raise ValueError("Remote HEAD query returned no data.")
+        return line.split()[0]
 
     def _clone_repo(self, repo_url: str, username: str = "", password: str = "") -> Path:
         self.cleanup()
@@ -49,6 +66,7 @@ class RepoResolver:
             capture_output=True,
             text=True,
             check=False,
+            timeout=120,
         )
 
         if process.returncode != 0:

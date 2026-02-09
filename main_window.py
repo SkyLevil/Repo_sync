@@ -40,6 +40,9 @@ class MainWindow(QMainWindow):
         self.app_data_dir = Path.home() / ".repo_sync_gui"
         self.credential_store = CredentialStore(self.app_data_dir)
 
+        self.last_state_hash = ""
+        self.check_in_progress = False
+
         self.repo_root_edit = QLineEdit()
         self.repo_root_edit.setPlaceholderText(
             "Optional: Local repo root path or repository URL (https://..., git@..., ...)."
@@ -89,8 +92,9 @@ class MainWindow(QMainWindow):
         self.auto_sync_on_change_checkbox = QCheckBox("Auto sync when changes are detected")
 
         sync_btn = QPushButton("Run sync now")
-        sync_btn.clicked.connect(self._run_sync)
+        sync_btn.clicked.connect(lambda: self._run_sync(show_error_dialog=True, clear_log=True))
 
+        self.status_label = QLabel("Status: Idle")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
 
@@ -135,6 +139,7 @@ class MainWindow(QMainWindow):
         watcher_row.addStretch()
         layout.addLayout(watcher_row)
 
+        layout.addWidget(self.status_label)
         layout.addWidget(QLabel("Log"))
         layout.addWidget(self.log)
 
@@ -143,7 +148,6 @@ class MainWindow(QMainWindow):
 
         self.check_timer = QTimer(self)
         self.check_timer.timeout.connect(self._on_periodic_check)
-        self.last_state_hash = ""
 
         self._load_settings()
 
@@ -157,6 +161,9 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self.repo_resolver.cleanup()
         super().closeEvent(event)
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(f"Status: {text}")
 
     def _append_log(self, message: str) -> None:
         self.log.appendPlainText(message)
@@ -240,8 +247,11 @@ class MainWindow(QMainWindow):
 
         return repo_base / candidate
 
-    def _run_sync(self) -> None:
-        self.log.clear()
+    def _run_sync(self, show_error_dialog: bool, clear_log: bool) -> bool:
+        if clear_log:
+            self.log.clear()
+
+        self._set_status("Syncing...")
         self.repo_resolver.cleanup()
 
         try:
@@ -254,44 +264,82 @@ class MainWindow(QMainWindow):
             self.last_state_hash = self._calculate_state_hash(pairs)
             self._append_log("[SUCCESS] Sync finished.")
             self._save_settings()
+            self._set_status("Idle")
+            return True
         except Exception as exc:
-            QMessageBox.critical(self, "Sync failed", str(exc))
+            if show_error_dialog:
+                QMessageBox.critical(self, "Sync failed", str(exc))
             self._append_log(f"[ERROR] {exc}")
+            self._set_status("Idle")
+            return False
 
     def _update_timer_state(self) -> None:
         self.interval_spinbox.setEnabled(self.periodic_check_checkbox.isChecked())
 
         if not self.periodic_check_checkbox.isChecked():
             self.check_timer.stop()
+            self._set_status("Idle")
             return
 
         self.check_timer.start(self.interval_spinbox.value() * 1000)
         self._append_log(
             f"[INFO] Periodic checks active (every {self.interval_spinbox.value()} seconds)."
         )
+        self._set_status("Watching for changes...")
 
     def _on_periodic_check(self) -> None:
+        if self.check_in_progress:
+            self._append_log("[INFO] Previous check still running, skipping this cycle.")
+            return
+
+        self.check_in_progress = True
+        self._set_status("Checking for changes...")
+
         try:
-            self.repo_resolver.cleanup()
-            pairs = self._collect_pairs()
-            current_hash = self._calculate_state_hash(pairs)
+            changed, new_state = self._detect_changes()
 
             if not self.last_state_hash:
-                self.last_state_hash = current_hash
+                self.last_state_hash = new_state
+                self._append_log("[INFO] Baseline captured for auto-sync checks.")
+                self._set_status("Watching for changes...")
                 return
 
-            if current_hash != self.last_state_hash:
-                self._append_log("[INFO] Change detected in source folders.")
-                self.last_state_hash = current_hash
+            if changed:
+                self._append_log("[INFO] Change detected in source repository/folders.")
+                self.last_state_hash = new_state
                 if self.auto_sync_on_change_checkbox.isChecked():
-                    self._append_log("[INFO] Auto-sync triggered.")
-                    self.engine.sync_pairs(
-                        pairs=pairs,
-                        two_way=self.two_way_checkbox.isChecked(),
-                        delete_stale=self.delete_checkbox.isChecked(),
-                    )
+                    self._append_log("[INFO] Auto-sync is running now...")
+                    self._set_status("Auto-sync in progress...")
+                    ok = self._run_sync(show_error_dialog=False, clear_log=False)
+                    if ok:
+                        self._append_log("[INFO] Auto-sync completed.")
+                    else:
+                        self._append_log("[WARN] Auto-sync failed.")
+                else:
+                    self._append_log("[INFO] Auto-sync is disabled; no sync executed.")
+            else:
+                self._append_log("[INFO] No changes detected.")
+
+            self._set_status("Watching for changes...")
         except Exception as exc:
             self._append_log(f"[WARN] Periodic check failed: {exc}")
+            self._set_status("Watching for changes...")
+        finally:
+            self.check_in_progress = False
+
+    def _detect_changes(self) -> tuple[bool, str]:
+        repo_input = self.repo_root_edit.text().strip()
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text().strip()
+
+        if repo_input and RepoResolver.is_repo_url(repo_input):
+            remote_head = self.repo_resolver.get_remote_head(repo_input, username=username, password=password)
+            return (self.last_state_hash != "" and remote_head != self.last_state_hash), remote_head
+
+        self.repo_resolver.cleanup()
+        pairs = self._collect_pairs()
+        current_hash = self._calculate_state_hash(pairs)
+        return (self.last_state_hash != "" and current_hash != self.last_state_hash), current_hash
 
     @staticmethod
     def _calculate_state_hash(pairs: List[SyncPair]) -> str:
