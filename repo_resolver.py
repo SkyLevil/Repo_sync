@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 class RepoResolver:
@@ -83,8 +84,22 @@ class RepoResolver:
         if not repo_url.startswith("http://") and not repo_url.startswith("https://"):
             return repo_url
 
-        scheme, rest = repo_url.split("://", maxsplit=1)
-        return f"{scheme}://{username}:{password}@{rest}"
+        parsed = urlsplit(repo_url)
+        if not parsed.hostname:
+            return repo_url
+
+        quoted_user = quote(username, safe="")
+        quoted_pass = quote(password, safe="")
+
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+
+        netloc = f"{quoted_user}:{quoted_pass}@{host}"
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
     def cleanup(self) -> None:
         if self._temp_dir is not None:
