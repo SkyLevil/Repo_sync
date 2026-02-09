@@ -10,6 +10,8 @@ A desktop GUI to sync folders between:
 
 - PySide6 GUI.
 - Sync pairs with **Source folder** and **Target folder**.
+- Background worker execution using multiple threads (GUI stays responsive).
+- Progress bar with live percentage and current operation text.
 - Optional one-way or two-way sync.
 - Optional stale-file cleanup on destination.
 - Optional auto update checks.
@@ -17,7 +19,6 @@ A desktop GUI to sync folders between:
 - Optional auto-sync on new commit/change.
 - Repository URL watch mode tracks **`main` branch commits** (`refs/heads/main`).
 - Optional **auto commit and push** after sync.
-- Visible status indicator (`Idle`, `Watching...`, `Checking...`, `Auto-sync in progress...`).
 - Optional login with username/password for repository URLs.
 - Optional encrypted credential storage.
 - Persisted sync pair configuration across restarts.

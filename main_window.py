@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QObject, QRunnable, QSettings, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -15,8 +15,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -33,11 +34,34 @@ from sync_models import SyncPair
 REMOTE_WATCH_BRANCH = "main"
 
 
+class WorkerSignals(QObject):
+    finished = Signal(dict)
+    error = Signal(str)
+    log = Signal(str)
+    progress = Signal(int, int, str)
+
+
+class FunctionTask(QRunnable):
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = self._fn(*self._args, signals=self.signals, **self._kwargs)
+            self.signals.finished.emit(result or {})
+        except Exception as exc:  # noqa: BLE001
+            self.signals.error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Folder Sync (Repo URL / Local / Windows)")
-        self.resize(1050, 740)
+        self.resize(1050, 760)
 
         self.settings = QSettings("RepoSync", "FolderSyncGui")
         self.app_data_dir = Path.home() / ".repo_sync_gui"
@@ -45,7 +69,10 @@ class MainWindow(QMainWindow):
 
         self.last_state_hash = ""
         self.check_in_progress = False
-        self.current_repo_base: Optional[Path] = None
+        self.sync_in_progress = False
+
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(max(2, self.thread_pool.maxThreadCount()))
 
         self.repo_root_edit = QLineEdit()
         self.repo_root_edit.setPlaceholderText(
@@ -105,9 +132,14 @@ class MainWindow(QMainWindow):
         self.commit_message_edit.setPlaceholderText("Commit message")
 
         sync_btn = QPushButton("Run sync now")
-        sync_btn.clicked.connect(lambda: self._run_sync(show_error_dialog=True, clear_log=True))
+        sync_btn.clicked.connect(lambda: self._run_sync_async(show_error_dialog=True, clear_log=True))
 
         self.status_label = QLabel("Status: Idle")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
 
@@ -162,12 +194,9 @@ class MainWindow(QMainWindow):
         layout.addLayout(push_row)
 
         layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_bar)
         layout.addWidget(QLabel("Log"))
         layout.addWidget(self.log)
-
-        self.engine = SyncEngine(self._append_log)
-        self.repo_resolver = RepoResolver(self._append_log, cache_dir=self.app_data_dir / "repo_cache")
-        self.git_publisher = GitPublisher(self._append_log)
 
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
@@ -183,7 +212,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         self._save_settings()
-        self.repo_resolver.cleanup()
         self.check_timer.stop()
         super().closeEvent(event)
 
@@ -229,30 +257,46 @@ class MainWindow(QMainWindow):
         if selected:
             self.table.setItem(row, 1, QTableWidgetItem(selected))
 
-    def _collect_pairs(self) -> List[SyncPair]:
-        repo_base = self.repo_resolver.resolve(
-            self.repo_root_edit.text(),
-            username=self.username_edit.text().strip(),
-            password=self.password_edit.text().strip(),
-        )
-
-        self.current_repo_base = repo_base
-
-        pairs: List[SyncPair] = []
+    def _snapshot_config(self) -> dict:
+        pairs: List[Dict[str, str]] = []
         for row in range(self.table.rowCount()):
             src_item = self.table.item(row, 0)
             dst_item = self.table.item(row, 1)
+            pairs.append(
+                {
+                    "source": src_item.text().strip() if src_item else "",
+                    "target": dst_item.text().strip() if dst_item else "",
+                }
+            )
 
-            source_text = src_item.text().strip() if src_item else ""
-            target_text = dst_item.text().strip() if dst_item else ""
+        return {
+            "repo_input": self.repo_root_edit.text().strip(),
+            "username": self.username_edit.text().strip(),
+            "password": self.password_edit.text().strip(),
+            "pairs": pairs,
+            "two_way": self.two_way_checkbox.isChecked(),
+            "delete_stale": self.delete_checkbox.isChecked(),
+            "auto_push": self.auto_push_checkbox.isChecked(),
+            "push_branch": self.push_branch_edit.text().strip() or "main",
+            "commit_message": self.commit_message_edit.text().strip() or "Sync updates",
+            "auto_sync": self.auto_sync_on_change_checkbox.isChecked(),
+            "last_state_hash": self.last_state_hash,
+        }
+
+    @staticmethod
+    def _build_pairs(config: dict, repo_base: Optional[Path]) -> List[SyncPair]:
+        pairs: List[SyncPair] = []
+        for idx, pair in enumerate(config["pairs"], start=1):
+            source_text = pair.get("source", "").strip()
+            target_text = pair.get("target", "").strip()
 
             if not source_text and not target_text:
                 continue
             if not source_text or not target_text:
-                raise ValueError(f"Row {row + 1}: both columns are required.")
+                raise ValueError(f"Row {idx}: both columns are required.")
 
-            source_path = self._resolve_pair_path(source_text, repo_base, row + 1, "source")
-            target_path = self._resolve_pair_path(target_text, repo_base, row + 1, "target")
+            source_path = MainWindow._resolve_pair_path(source_text, repo_base, idx, "source")
+            target_path = MainWindow._resolve_pair_path(target_text, repo_base, idx, "target")
             pairs.append(SyncPair(source=source_path, target=target_path))
 
         if not pairs:
@@ -263,165 +307,162 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _resolve_pair_path(raw_path: str, repo_base: Optional[Path], row_number: int, role: str) -> Path:
         candidate = Path(raw_path)
-
         if candidate.is_absolute():
             return candidate
-
         if repo_base is None:
             raise ValueError(
                 f"Row {row_number}: relative {role} path '{raw_path}' needs a repo root path or repo URL."
             )
-
         return repo_base / candidate
 
-    def _run_sync(self, show_error_dialog: bool, clear_log: bool) -> bool:
+    def _run_sync_async(self, show_error_dialog: bool, clear_log: bool) -> None:
+        if self.sync_in_progress:
+            self._append_log("[INFO] Sync already running.")
+            return
+
         if clear_log:
             self.log.clear()
+        self.progress_bar.setValue(0)
+        self._set_status("Syncing in background...")
+        self.sync_in_progress = True
 
-        self._set_status("Syncing...")
-        self.repo_resolver.cleanup()
+        config = self._snapshot_config()
+        task = FunctionTask(self._sync_job, config)
+        task.signals.log.connect(self._append_log)
+        task.signals.progress.connect(self._on_progress)
+        task.signals.error.connect(lambda e: self._on_sync_error(e, show_error_dialog))
+        task.signals.finished.connect(self._on_sync_finished)
+        self.thread_pool.start(task)
 
-        try:
-            pairs = self._collect_pairs()
-            self.engine.sync_pairs(
-                pairs=pairs,
-                two_way=self.two_way_checkbox.isChecked(),
-                delete_stale=self.delete_checkbox.isChecked(),
-            )
+    def _on_progress(self, done: int, total: int, message: str) -> None:
+        percent = int((done / max(total, 1)) * 100)
+        self.progress_bar.setValue(percent)
+        self.progress_bar.setFormat(f"{percent}% - {message}")
 
-            self._run_optional_git_push()
+    def _sync_job(self, config: dict, signals: WorkerSignals) -> dict:
+        logger = lambda msg: signals.log.emit(msg)
+        resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
+        repo_base = resolver.resolve(config["repo_input"], config["username"], config["password"])
+        pairs = self._build_pairs(config, repo_base)
 
-            self.last_state_hash = self._current_state_value(pairs)
-            self._append_log("[SUCCESS] Sync finished.")
-            self._save_settings()
-            self._set_status("Idle")
-            return True
-        except Exception as exc:
-            if show_error_dialog:
-                QMessageBox.critical(self, "Sync failed", str(exc))
-            self._append_log(f"[ERROR] {exc}")
-            self._set_status("Idle")
-            return False
+        engine = SyncEngine(logger)
+        engine.sync_pairs(
+            pairs=pairs,
+            two_way=config["two_way"],
+            delete_stale=config["delete_stale"],
+            progress_callback=lambda d, t, m: signals.progress.emit(d, t, m),
+        )
 
-    def _run_optional_git_push(self) -> None:
-        if not self.auto_push_checkbox.isChecked():
-            return
+        if config["auto_push"]:
+            if repo_base is None:
+                logger("[WARN] Auto push skipped: repo path unresolved.")
+            else:
+                logger("[INFO] Auto commit/push started...")
+                GitPublisher(logger).commit_and_push(repo_base, config["push_branch"], config["commit_message"])
 
-        repo_text = self.repo_root_edit.text().strip()
-        if not repo_text:
-            self._append_log("[WARN] Auto push skipped: repo root is empty.")
-            return
+        new_state = self._compute_state_value(config, pairs, resolver)
+        return {"new_state": new_state}
 
-        repo_path = self.current_repo_base
-        if repo_path is None:
-            repo_path = self.repo_resolver.resolve(
-                repo_text,
-                username=self.username_edit.text().strip(),
-                password=self.password_edit.text().strip(),
-            )
-        if repo_path is None:
-            self._append_log("[WARN] Auto push skipped: could not resolve repository path.")
-            return
-        branch = self.push_branch_edit.text().strip() or "main"
-        commit_message = self.commit_message_edit.text().strip() or "Sync updates"
+    def _on_sync_error(self, error_text: str, show_error_dialog: bool) -> None:
+        self.sync_in_progress = False
+        self._set_status("Idle")
+        self._append_log(f"[ERROR] {error_text}")
+        if show_error_dialog:
+            QMessageBox.critical(self, "Sync failed", error_text)
 
-        self._append_log("[INFO] Auto commit/push started...")
-        self.git_publisher.commit_and_push(repo_path, branch=branch, commit_message=commit_message)
+    def _on_sync_finished(self, result: dict) -> None:
+        self.sync_in_progress = False
+        self.last_state_hash = result.get("new_state", self.last_state_hash)
+        self._append_log("[SUCCESS] Sync finished.")
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("100% - done")
+        self._set_status("Idle")
+        self._save_settings()
 
     def _schedule_next_check(self) -> None:
         if not self.periodic_check_checkbox.isChecked():
             return
-
-        if self.continuous_watch_checkbox.isChecked():
-            self.check_timer.start(1000)
-        else:
-            self.check_timer.start(self.interval_spinbox.value() * 1000)
+        self.check_timer.start(1000 if self.continuous_watch_checkbox.isChecked() else self.interval_spinbox.value() * 1000)
 
     def _update_timer_state(self) -> None:
         self.interval_spinbox.setEnabled(
             self.periodic_check_checkbox.isChecked() and not self.continuous_watch_checkbox.isChecked()
         )
-
         self.check_timer.stop()
         if not self.periodic_check_checkbox.isChecked():
             self._set_status("Idle")
             return
 
         mode = "continuous" if self.continuous_watch_checkbox.isChecked() else "interval"
-        self._append_log(
-            f"[INFO] Auto update checks active ({mode}, branch '{REMOTE_WATCH_BRANCH}')."
-        )
+        self._append_log(f"[INFO] Auto update checks active ({mode}, branch '{REMOTE_WATCH_BRANCH}').")
         self._set_status("Watching for new commits/changes...")
         self._schedule_next_check()
 
     def _on_periodic_check(self) -> None:
         if self.check_in_progress:
-            self._append_log("[INFO] Previous check still running, skipping this cycle.")
             self._schedule_next_check()
             return
 
         self.check_in_progress = True
-        self._set_status("Checking for new commits/changes...")
+        self._set_status("Checking for new commits/changes (background)...")
 
-        try:
-            changed, new_state = self._detect_changes()
+        config = self._snapshot_config()
+        task = FunctionTask(self._check_job, config)
+        task.signals.log.connect(self._append_log)
+        task.signals.error.connect(self._on_check_error)
+        task.signals.finished.connect(self._on_check_finished)
+        self.thread_pool.start(task)
 
-            if not self.last_state_hash:
-                self.last_state_hash = new_state
-                self._append_log(
-                    f"[INFO] Baseline captured for auto-sync checks (branch '{REMOTE_WATCH_BRANCH}')."
-                )
-            elif changed:
-                self._append_log("[INFO] New commit/change detected.")
-                self.last_state_hash = new_state
-                if self.auto_sync_on_change_checkbox.isChecked():
-                    self._append_log("[INFO] Auto-sync is running now...")
-                    self._set_status("Auto-sync in progress...")
-                    ok = self._run_sync(show_error_dialog=False, clear_log=False)
-                    if ok:
-                        self._append_log("[INFO] Auto-sync completed.")
-                    else:
-                        self._append_log("[WARN] Auto-sync failed.")
-                else:
-                    self._append_log("[INFO] Auto-sync is disabled; no sync executed.")
-            else:
-                self._append_log("[INFO] No new commits/changes detected.")
+    def _check_job(self, config: dict, signals: WorkerSignals) -> dict:
+        logger = lambda msg: signals.log.emit(msg)
+        resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
 
-            self._set_status("Watching for new commits/changes...")
-        except Exception as exc:
-            self._append_log(f"[WARN] Periodic check failed: {exc}")
-            self._set_status("Watching for new commits/changes...")
-        finally:
-            self.check_in_progress = False
-            self._schedule_next_check()
-
-    def _detect_changes(self) -> tuple[bool, str]:
-        repo_input = self.repo_root_edit.text().strip()
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text().strip()
-
-        if repo_input and RepoResolver.is_repo_url(repo_input):
-            remote_head = self.repo_resolver.get_remote_branch_head(
-                repo_input,
+        if config["repo_input"] and RepoResolver.is_repo_url(config["repo_input"]):
+            new_state = resolver.get_remote_branch_head(
+                config["repo_input"],
                 branch=REMOTE_WATCH_BRANCH,
-                username=username,
-                password=password,
+                username=config["username"],
+                password=config["password"],
             )
-            return (self.last_state_hash != "" and remote_head != self.last_state_hash), remote_head
+        else:
+            repo_base = resolver.resolve(config["repo_input"], config["username"], config["password"])
+            pairs = self._build_pairs(config, repo_base)
+            new_state = self._calculate_state_hash(pairs)
 
-        self.repo_resolver.cleanup()
-        pairs = self._collect_pairs()
-        current_hash = self._calculate_state_hash(pairs)
-        return (self.last_state_hash != "" and current_hash != self.last_state_hash), current_hash
+        changed = config["last_state_hash"] != "" and new_state != config["last_state_hash"]
+        return {"new_state": new_state, "changed": changed, "auto_sync": config["auto_sync"]}
 
-    def _current_state_value(self, pairs: List[SyncPair]) -> str:
-        repo_input = self.repo_root_edit.text().strip()
-        if repo_input and RepoResolver.is_repo_url(repo_input):
-            return self.repo_resolver.get_remote_branch_head(
-                repo_input,
+    def _on_check_error(self, error_text: str) -> None:
+        self.check_in_progress = False
+        self._append_log(f"[WARN] Periodic check failed: {error_text}")
+        self._set_status("Watching for new commits/changes...")
+        self._schedule_next_check()
+
+    def _on_check_finished(self, result: dict) -> None:
+        self.check_in_progress = False
+        new_state = result.get("new_state", "")
+
+        if not self.last_state_hash and new_state:
+            self.last_state_hash = new_state
+            self._append_log(f"[INFO] Baseline captured for branch '{REMOTE_WATCH_BRANCH}'.")
+        elif result.get("changed"):
+            self._append_log("[INFO] New commit/change detected.")
+            self.last_state_hash = new_state
+            if result.get("auto_sync"):
+                self._run_sync_async(show_error_dialog=False, clear_log=False)
+        else:
+            self._append_log("[INFO] No new commits/changes detected.")
+
+        self._set_status("Watching for new commits/changes...")
+        self._schedule_next_check()
+
+    def _compute_state_value(self, config: dict, pairs: List[SyncPair], resolver: RepoResolver) -> str:
+        if config["repo_input"] and RepoResolver.is_repo_url(config["repo_input"]):
+            return resolver.get_remote_branch_head(
+                config["repo_input"],
                 branch=REMOTE_WATCH_BRANCH,
-                username=self.username_edit.text().strip(),
-                password=self.password_edit.text().strip(),
+                username=config["username"],
+                password=config["password"],
             )
         return self._calculate_state_hash(pairs)
 
