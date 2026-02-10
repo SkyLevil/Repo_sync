@@ -17,6 +17,7 @@ A desktop GUI to sync directly between local folders and remote repositories.
 - Optional auto commit/push for repository targets.
 - Optional login with username/password for repository URLs.
 - Persisted settings and sync table across restarts.
+- Persistent crash debug log written to `~/.repo_sync_gui/crash.log` (including unhandled exceptions and low-level fault dumps).
 
 ## Requirements
 
