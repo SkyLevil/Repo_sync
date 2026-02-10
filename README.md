@@ -50,6 +50,7 @@ python sync_gui.py
 - Auto commit/push will create a commit each sync run (`--allow-empty`) so pushes are always visible on GitHub.
 
 - Repository targets are reset to `origin/<push-branch>` before each sync run to avoid stale local commits in cached clones.
+- If the configured push branch does not exist with exact casing on `origin`, the app resolves a matching remote branch (case-insensitive) or falls back to the remote default branch as sync base.
 - Files larger than 95 MB are automatically tracked with Git LFS before commit/push.
 - Git LFS must be installed locally for >95MB files (`git lfs version`).
 - After pushing, the app also runs an explicit `git lfs push origin <branch>` for large files to ensure LFS objects are uploaded.

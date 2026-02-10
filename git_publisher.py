@@ -15,9 +15,23 @@ class GitPublisher:
         if not (repo_path / ".git").exists():
             raise ValueError(f"'{repo_path}' is not a git repository (missing .git).")
 
-        self._ensure_branch(repo_path, branch)
-        self._run(["git", "-C", str(repo_path), "fetch", "origin", branch], f"Fetch origin/{branch}")
-        self._run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch}"], "Reset local branch")
+        self._run(["git", "-C", str(repo_path), "fetch", "--prune", "origin"], "Fetch origin")
+
+        remote_branch = self._resolve_remote_branch(repo_path, branch)
+        if remote_branch is None:
+            remote_branch = self._get_remote_default_branch(repo_path)
+            self._logger(
+                f"[WARN] origin/{branch} not found. Using origin/{remote_branch} as preparation base."
+            )
+
+        if remote_branch.lower() != branch.lower():
+            self._logger(f"[INFO] Using remote branch origin/{remote_branch} for configured branch '{branch}'.")
+
+        self._run(
+            ["git", "-C", str(repo_path), "checkout", "-B", branch, f"origin/{remote_branch}"],
+            f"Checkout {branch} from origin/{remote_branch}",
+        )
+        self._run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{remote_branch}"], "Reset local branch")
         self._run(["git", "-C", str(repo_path), "clean", "-fd"], "Clean untracked files")
         self._logger(f"[INFO] Repository prepared at {repo_path} on branch {branch}.")
 
@@ -111,6 +125,54 @@ class GitPublisher:
             return
 
         self._run(["git", "-C", str(repo_path), "checkout", "-B", branch], f"Create local branch {branch}")
+
+    def _resolve_remote_branch(self, repo_path: Path, branch: str) -> str | None:
+        branch_names = self._list_remote_branches(repo_path)
+        if branch in branch_names:
+            return branch
+
+        wanted = branch.lower()
+        for remote_branch in branch_names:
+            if remote_branch.lower() == wanted:
+                return remote_branch
+
+        return None
+
+    def _get_remote_default_branch(self, repo_path: Path) -> str:
+        head = self._run_capture(
+            ["git", "-C", str(repo_path), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            "Resolve origin/HEAD",
+        )
+        if head.returncode == 0 and head.stdout.strip().startswith("origin/"):
+            return head.stdout.strip().split("/", 1)[1]
+
+        branches = self._list_remote_branches(repo_path)
+        if "main" in branches:
+            return "main"
+        if "master" in branches:
+            return "master"
+        if branches:
+            return branches[0]
+        raise ValueError("No remote branches found on origin.")
+
+    def _list_remote_branches(self, repo_path: Path) -> list[str]:
+        output = self._run_capture(
+            ["git", "-C", str(repo_path), "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"],
+            "List origin branches",
+        )
+        if output.returncode != 0:
+            raise ValueError(f"Failed to list origin branches.\n{output.stderr.strip() or output.stdout.strip()}")
+
+        branches: list[str] = []
+        for line in output.stdout.splitlines():
+            ref = line.strip()
+            if not ref.startswith("origin/"):
+                continue
+            name = ref.split("/", 1)[1]
+            if name == "HEAD":
+                continue
+            branches.append(name)
+        return branches
 
     def _run(self, cmd: list[str], action: str) -> None:
         result = self._run_capture(cmd, action)
