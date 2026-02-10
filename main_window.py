@@ -343,6 +343,7 @@ class MainWindow(QMainWindow):
         self.sync_in_progress = True
 
         config = self._snapshot_config()
+        config["auto_triggered"] = not show_error_dialog
         task = FunctionTask(self._sync_job, config)
         task.signals.log.connect(self._append_log)
         task.signals.progress.connect(self._on_progress)
@@ -369,10 +370,16 @@ class MainWindow(QMainWindow):
             GitPublisher(logger).prepare_repository(repo_path, config["push_branch"])
 
         engine = SyncEngine(logger)
+        sync_two_way = config["two_way"]
+        sync_delete_stale = config["delete_stale"]
+        if config.get("auto_triggered"):
+            # Keep source/target mirrors accurate during automatic sync runs.
+            sync_delete_stale = True
+
         engine.sync_pairs(
             pairs=pairs,
-            two_way=config["two_way"],
-            delete_stale=config["delete_stale"],
+            two_way=sync_two_way,
+            delete_stale=sync_delete_stale,
             progress_callback=lambda d, t, m: signals.progress.emit(d, t, m),
         )
 
@@ -443,7 +450,7 @@ class MainWindow(QMainWindow):
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
 
-        new_state = self._compute_state_by_sources(config, resolver)
+        new_state = self._compute_state_by_pairs(config, resolver)
         changed = config["last_state_hash"] != "" and new_state != config["last_state_hash"]
         return {"new_state": new_state, "changed": changed, "auto_sync": config["auto_sync"]}
 
@@ -471,40 +478,54 @@ class MainWindow(QMainWindow):
         self._set_status("Watching for new commits/changes...")
         self._schedule_next_check()
 
-    def _compute_state_by_sources(self, config: dict, resolver: RepoResolver) -> str:
+    @staticmethod
+    def _hash_directory(path: Path) -> str:
         hasher = hashlib.sha256()
-        for pair in config["pairs"]:
-            source_type = pair.get("source_type", TYPE_PATH)
-            source_value = pair.get("source", "").strip()
-            if not source_value:
-                continue
+        if not path.exists() or not path.is_dir():
+            return ""
 
-            if source_type == TYPE_REPO:
-                head = resolver.get_remote_branch_head(
-                    source_value,
-                    branch=REMOTE_WATCH_BRANCH,
-                    username=config["username"],
-                    password=config["password"],
-                )
-                hasher.update(source_value.encode("utf-8"))
-                hasher.update(head.encode("utf-8"))
-            else:
-                path = Path(source_value)
-                if not path.exists() or not path.is_dir():
+        for file_path in sorted(p for p in path.rglob("*") if p.is_file()):
+            try:
+                relative = file_path.relative_to(path)
+            except ValueError:
+                continue
+            if ".git" in relative.parts:
+                continue
+            hasher.update(relative.as_posix().encode("utf-8"))
+            with file_path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _compute_state_by_pairs(self, config: dict, resolver: RepoResolver) -> str:
+        hasher = hashlib.sha256()
+        for idx, pair in enumerate(config["pairs"], start=1):
+            for endpoint_side in ("source", "target"):
+                endpoint_type = pair.get(f"{endpoint_side}_type", TYPE_PATH)
+                endpoint_value = pair.get(endpoint_side, "").strip()
+                if not endpoint_value:
                     continue
-                hasher.update(str(path).encode("utf-8"))
-                for file_path in sorted(p for p in path.rglob("*") if p.is_file()):
-                    stat = file_path.stat()
-                    hasher.update(str(file_path).encode("utf-8"))
-                    hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
-                    hasher.update(str(stat.st_size).encode("utf-8"))
+
+                endpoint_path, _ = self._resolve_endpoint(
+                    resolver,
+                    endpoint_type,
+                    endpoint_value,
+                    config["username"],
+                    config["password"],
+                )
+                endpoint_hash = self._hash_directory(endpoint_path)
+                hasher.update(f"{idx}:{endpoint_side}:{endpoint_type}".encode("utf-8"))
+                hasher.update(endpoint_hash.encode("utf-8"))
 
         return hasher.hexdigest()
 
     def _compute_state_value(self, config: dict, pairs: List[SyncPair], resolver: RepoResolver) -> str:
-        # Keep compatibility by computing based on current source definitions from config.
+        # Keep compatibility by computing based on current pair definitions from config.
         _ = pairs
-        return self._compute_state_by_sources(config, resolver)
+        return self._compute_state_by_pairs(config, resolver)
 
     def _save_settings(self) -> None:
         self.settings.setValue("two_way", self.two_way_checkbox.isChecked())

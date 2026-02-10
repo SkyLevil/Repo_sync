@@ -42,6 +42,8 @@ python sync_gui.py
 - Repository URL sources are refreshed from `origin` and the local working tree is aligned to the remote default branch before sync.
 - The source/target selection now happens per row via endpoint type dropdowns.
 - Path picker buttons work only for rows where endpoint type is `Path`.
+- File comparison uses content hashing (SHA-256), not only timestamps, so changed files with same size are detected reliably.
+- During automatic sync runs, stale files are removed on the target side to keep source/target states aligned.
 
 - Git metadata folders (`.git`) are excluded from file-sync operations to avoid corrupting repository internals.
 

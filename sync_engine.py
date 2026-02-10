@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -82,13 +83,12 @@ class SyncEngine:
     ) -> None:
         copied, updated, skipped = 0, 0, 0
 
-        for src_file in source.rglob("*"):
-            if src_file.is_dir():
-                continue
+        source_files = [
+            p for p in source.rglob("*") if p.is_file() and not self._is_git_metadata(p.relative_to(source))
+        ]
 
+        for src_file in source_files:
             relative = src_file.relative_to(source)
-            if self._is_git_metadata(relative):
-                continue
 
             dst_file = target / relative
             dst_file.parent.mkdir(parents=True, exist_ok=True)
@@ -100,10 +100,7 @@ class SyncEngine:
                 self._emit_progress(progress_callback, progress, f"Copied {relative}")
                 continue
 
-            src_stat = src_file.stat()
-            dst_stat = dst_file.stat()
-
-            if src_stat.st_mtime > dst_stat.st_mtime or src_stat.st_size != dst_stat.st_size:
+            if not self._files_equal(src_file, dst_file):
                 shutil.copy2(src_file, dst_file)
                 updated += 1
                 self._logger(f"  * updated: {relative}")
@@ -134,6 +131,26 @@ class SyncEngine:
         self._logger(
             f"[DONE] copied={copied}, updated={updated}, skipped={skipped}, removed={removed}"
         )
+
+    @staticmethod
+    def _file_sha256(file_path: Path) -> str:
+        hasher = hashlib.sha256()
+        with file_path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _files_equal(self, source_file: Path, target_file: Path) -> bool:
+        src_stat = source_file.stat()
+        dst_stat = target_file.stat()
+
+        if src_stat.st_size != dst_stat.st_size:
+            return False
+
+        return self._file_sha256(source_file) == self._file_sha256(target_file)
 
     @staticmethod
     def _emit_progress(progress_callback: Optional[ProgressCallback], progress: dict, message: str) -> None:
