@@ -47,4 +47,5 @@ python sync_gui.py
 - Auto commit/push will create a commit each sync run (`--allow-empty`) so pushes are always visible on GitHub.
 
 - Repository targets are reset to `origin/<push-branch>` before each sync run to avoid stale local commits in cached clones.
-- Files larger than 95 MB are skipped during sync (GitHub hard limit is 100 MB; use Git LFS for large files).
+- Files larger than 95 MB are automatically tracked with Git LFS before commit/push.
+- Git LFS must be installed locally for >95MB files (`git lfs version`).
