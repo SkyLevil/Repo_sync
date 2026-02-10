@@ -21,7 +21,15 @@ def init_crash_logging(app_name: str = "repo_sync_gui") -> tuple[Callable[[str],
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    if not logger.handlers:
+    # Ensure a file handler for this exact log path always exists.
+    target_path = str(log_path.resolve())
+    has_target_handler = False
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == target_path:
+            has_target_handler = True
+            break
+
+    if not has_target_handler:
         handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(handler)
