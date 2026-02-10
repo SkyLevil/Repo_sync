@@ -49,3 +49,5 @@ python sync_gui.py
 - Repository targets are reset to `origin/<push-branch>` before each sync run to avoid stale local commits in cached clones.
 - Files larger than 95 MB are automatically tracked with Git LFS before commit/push.
 - Git LFS must be installed locally for >95MB files (`git lfs version`).
+- After pushing, the app also runs an explicit `git lfs push origin <branch>` for large files to ensure LFS objects are uploaded.
+- On GitHub, LFS-tracked files can appear as a small text pointer in the file viewer; this is expected. Use `git lfs ls-files` locally to verify the large binary is tracked/uploaded.

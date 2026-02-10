@@ -26,7 +26,7 @@ class GitPublisher:
             raise ValueError(f"'{repo_path}' is not a git repository (missing .git).")
 
         self._ensure_branch(repo_path, branch)
-        self._track_large_files_with_lfs(repo_path)
+        lfs_touched = self._track_large_files_with_lfs(repo_path)
         self._run(["git", "-C", str(repo_path), "add", "-A"], "Stage changes")
 
         status = self._run_capture(["git", "-C", str(repo_path), "status", "--porcelain"], "Read status")
@@ -46,14 +46,25 @@ class GitPublisher:
             raise ValueError(f"Git commit failed.\n{commit.stderr.strip() or commit.stdout.strip()}")
 
         self._logger("[INFO] Git commit created.")
-        self._run(["git", "-C", str(repo_path), "push", "-u", "origin", branch], f"Push to origin/{branch}")
+        self._run(["git", "-C", str(repo_path), "push", "-u", "origin", branch], f"Push commit to origin/{branch}")
+
+        if lfs_touched:
+            self._logger("[INFO] Uploading Git LFS objects...")
+            self._run(["git", "-C", str(repo_path), "lfs", "push", "origin", branch], f"Push LFS objects to origin/{branch}")
+            lfs_list = self._run_capture(["git", "-C", str(repo_path), "lfs", "ls-files"], "List LFS files")
+            if lfs_list.stdout.strip():
+                self._logger("[INFO] LFS tracked files:\n" + lfs_list.stdout.strip())
+            self._logger(
+                "[INFO] Large files are stored in Git LFS. GitHub file view may show a small pointer text file."
+            )
+
         self._logger(f"[INFO] Git push completed to origin/{branch}.")
         return True
 
-    def _track_large_files_with_lfs(self, repo_path: Path) -> None:
+    def _track_large_files_with_lfs(self, repo_path: Path) -> bool:
         large_files = self._find_large_files(repo_path)
         if not large_files:
-            return
+            return False
 
         self._ensure_git_lfs_available(repo_path)
         self._run(["git", "-C", str(repo_path), "lfs", "install", "--local"], "Initialize Git LFS")
@@ -62,8 +73,8 @@ class GitPublisher:
             self._logger(f"[INFO] Tracking large file with Git LFS: {rel}")
             self._run(["git", "-C", str(repo_path), "lfs", "track", "--", rel], f"Track LFS file {rel}")
 
-        # ensure .gitattributes is staged if updated by lfs track
         self._run(["git", "-C", str(repo_path), "add", ".gitattributes"], "Stage .gitattributes")
+        return True
 
     def _find_large_files(self, repo_path: Path) -> List[str]:
         files: List[str] = []
