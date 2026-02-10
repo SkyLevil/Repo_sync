@@ -600,7 +600,9 @@ class MainWindow(QMainWindow):
         self.delete_checkbox.setChecked(self._to_bool(self.settings.value("delete_stale", False)))
         self.periodic_check_checkbox.setChecked(self._to_bool(self.settings.value("periodic_check", False)))
         self.continuous_watch_checkbox.setChecked(self._to_bool(self.settings.value("continuous_watch", False)))
-        self.interval_spinbox.setValue(int(self.settings.value("interval_seconds", 60)))
+        interval_seconds = self._to_int(self.settings.value("interval_seconds", 60), 60)
+        interval_seconds = max(self.interval_spinbox.minimum(), min(self.interval_spinbox.maximum(), interval_seconds))
+        self.interval_spinbox.setValue(interval_seconds)
         self.auto_sync_on_change_checkbox.setChecked(self._to_bool(self.settings.value("auto_sync", False)))
         self.auto_push_checkbox.setChecked(self._to_bool(self.settings.value("auto_push", True)))
         self.push_branch_edit.setText(str(self.settings.value("push_branch", "main")))
@@ -636,3 +638,10 @@ class MainWindow(QMainWindow):
         if isinstance(value, bool):
             return value
         return str(value).lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _to_int(value, default: int) -> int:
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
