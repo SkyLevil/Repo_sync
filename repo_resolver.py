@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -87,6 +88,11 @@ class RepoResolver:
 
         if (clone_target / ".git").exists():
             self._update_clone(clone_target)
+            if not self._has_non_git_files(clone_target):
+                self._logger(
+                    "[WARN] Cached repository clone contains no working-tree files. Re-creating clone..."
+                )
+                self._recreate_clone(clone_target, auth_url)
             return clone_target
 
         if clone_target.exists() and any(clone_target.iterdir()):
@@ -110,6 +116,40 @@ class RepoResolver:
 
         self._logger(f"[INFO] Repository ready at: {clone_target}")
         return clone_target
+
+    @staticmethod
+    def _has_non_git_files(repo_path: Path) -> bool:
+        for path in repo_path.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                rel = path.relative_to(repo_path)
+            except ValueError:
+                continue
+            if ".git" in rel.parts:
+                continue
+            return True
+        return False
+
+    def _recreate_clone(self, clone_target: Path, auth_url: str) -> None:
+        shutil.rmtree(clone_target, ignore_errors=True)
+        clone_target.parent.mkdir(parents=True, exist_ok=True)
+
+        process = subprocess.run(
+            ["git", "clone", "--depth", "1", auth_url, str(clone_target)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if process.returncode != 0:
+            raise ValueError(f"Failed to recreate cached clone.\n{process.stderr.strip() or process.stdout.strip()}")
+
+        if not self._has_non_git_files(clone_target):
+            raise ValueError(
+                "Repository clone does not contain working-tree files after refresh. "
+                f"Please verify repository content and permissions for: {auth_url}"
+            )
 
     def _resolve_clone_target(self, repo_url: str, local_repo_path: str) -> Path:
         if local_repo_path.strip():
