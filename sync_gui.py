@@ -25,7 +25,7 @@ def main() -> None:
     try:
         write_marker("[BOOT] Importing PySide6 QApplication...")
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+        from PySide6.QtCore import QSettings, QtMsgType, qInstallMessageHandler
 
         write_marker("[BOOT] Importing MainWindow...")
         from main_window import MainWindow
@@ -44,15 +44,34 @@ def main() -> None:
                 location = f" ({context.file}:{getattr(context, 'line', '?')})"
             write_marker(f"[{level}] {message}{location}")
 
-        qInstallMessageHandler(_qt_message_handler)
-        write_marker("[BOOT] Qt message handler installed.")
+        try:
+            qInstallMessageHandler(_qt_message_handler)
+            write_marker("[BOOT] Qt message handler installed.")
+        except Exception as qt_handler_exc:  # noqa: BLE001
+            write_marker(f"[BOOT-WARN] Failed to install Qt message handler: {qt_handler_exc}")
 
         write_marker("[BOOT] Creating QApplication...")
         app = QApplication([])
         app.aboutToQuit.connect(lambda: write_marker("Application shutdown requested."))
 
         write_marker("[BOOT] Creating MainWindow...")
-        window = MainWindow()
+        try:
+            window = MainWindow()
+        except Exception as first_window_exc:  # noqa: BLE001
+            write_marker(
+                "[BOOT-WARN] MainWindow init failed. "
+                f"Attempting one-time settings reset and retry.\n{first_window_exc}\n{traceback.format_exc()}"
+            )
+            _emergency_bootstrap_log(
+                "[BOOT-WARN] MainWindow init failed; resetting QSettings and retrying once."
+            )
+            settings = QSettings("RepoSync", "FolderSyncGui")
+            settings.clear()
+            settings.sync()
+
+            window = MainWindow()
+            write_marker("[BOOT] MainWindow recovered after settings reset.")
+
         write_marker("[BOOT] Showing MainWindow...")
         window.show()
         write_marker("Main window shown.")

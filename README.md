@@ -19,6 +19,7 @@ A desktop GUI to sync directly between local folders and remote repositories.
 - Persisted settings and sync table across restarts.
 - Persistent crash debug log written to `~/.repo_sync_gui/crash.log` (including unhandled exceptions and low-level fault dumps).
 - Early-start bootstrap log written to `~/.repo_sync_gui/bootstrap_crash.log` to diagnose crashes before the UI is shown.
+- On startup failure during window initialization, the app performs a one-time reset of `QSettings` and retries window creation automatically.
 
 ## Requirements
 
