@@ -39,6 +39,7 @@ python sync_gui.py
 ## Notes
 
 - For `Repository URL` entries, the app resolves and maintains a local clone internally.
+- Repository URL sources are refreshed from `origin` and the local working tree is aligned to the remote default branch before sync.
 - The source/target selection now happens per row via endpoint type dropdowns.
 - Path picker buttons work only for rows where endpoint type is `Path`.
 

@@ -118,7 +118,7 @@ class RepoResolver:
 
     def _update_clone(self, repo_path: Path) -> None:
         process = subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "--depth", "1", "origin"],
+            ["git", "-C", str(repo_path), "fetch", "--depth", "1", "--prune", "origin"],
             capture_output=True,
             text=True,
             check=False,
@@ -126,6 +126,48 @@ class RepoResolver:
         )
         if process.returncode != 0:
             raise ValueError(f"Failed to update local repository.\n{process.stderr.strip() or process.stdout.strip()}")
+
+        remote_default_branch = self._get_remote_default_branch(repo_path)
+        self._checkout_remote_branch(repo_path, remote_default_branch)
+
+    @staticmethod
+    def _get_remote_default_branch(repo_path: Path) -> str:
+        process = subprocess.run(
+            ["git", "-C", str(repo_path), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if process.returncode == 0 and process.stdout.strip().startswith("origin/"):
+            return process.stdout.strip().split("/", 1)[1]
+        return "main"
+
+    @staticmethod
+    def _checkout_remote_branch(repo_path: Path, branch: str) -> None:
+        checkout = subprocess.run(
+            ["git", "-C", str(repo_path), "checkout", "-B", branch, f"origin/{branch}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if checkout.returncode != 0:
+            raise ValueError(
+                f"Failed to checkout origin/{branch}.\n{checkout.stderr.strip() or checkout.stdout.strip()}"
+            )
+
+        reset = subprocess.run(
+            ["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if reset.returncode != 0:
+            raise ValueError(
+                f"Failed to reset local clone to origin/{branch}.\n{reset.stderr.strip() or reset.stdout.strip()}"
+            )
 
     @staticmethod
     def _url_hash(value: str) -> str:
