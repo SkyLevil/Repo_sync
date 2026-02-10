@@ -85,8 +85,9 @@ class RepoResolver:
     ) -> Path:
         auth_url = self._build_authenticated_url(repo_url, username, password)
         clone_target = self._resolve_clone_target(repo_url, local_repo_path)
+        has_user_local_path = bool(local_repo_path.strip())
 
-        if (clone_target / ".git").exists():
+        if clone_target.exists() and self._is_valid_git_repo(clone_target):
             self._update_clone(clone_target)
             if not self._has_non_git_files(clone_target):
                 self._logger(
@@ -96,6 +97,12 @@ class RepoResolver:
             return clone_target
 
         if clone_target.exists() and any(clone_target.iterdir()):
+            if not has_user_local_path:
+                self._logger(
+                    "[WARN] Cached repository path exists but is not a valid git repository. Re-creating clone..."
+                )
+                self._recreate_clone(clone_target, auth_url)
+                return clone_target
             raise ValueError(
                 f"Local repo path exists and is not a git repo: {clone_target}. "
                 "Please choose an empty folder or an existing git clone."
@@ -116,6 +123,20 @@ class RepoResolver:
 
         self._logger(f"[INFO] Repository ready at: {clone_target}")
         return clone_target
+
+    @staticmethod
+    def _is_valid_git_repo(repo_path: Path) -> bool:
+        if not repo_path.exists() or not repo_path.is_dir():
+            return False
+
+        process = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        return process.returncode == 0 and process.stdout.strip().lower() == "true"
 
     @staticmethod
     def _has_non_git_files(repo_path: Path) -> bool:

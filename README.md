@@ -40,6 +40,7 @@ python sync_gui.py
 
 - For `Repository URL` entries, the app resolves and maintains a local clone internally.
 - Sync logs show the local clone path for repository URLs, but the clone is refreshed from the remote repository before each run.
+- If the internal cache path is corrupted or no longer a valid git repository, it is recreated automatically.
 - Repository URL sources are refreshed from `origin` and the local working tree is aligned to the remote default branch before sync.
 - The source/target selection now happens per row via endpoint type dropdowns.
 - Path picker buttons work only for rows where endpoint type is `Path`.
