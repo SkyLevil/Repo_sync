@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import shutil
 import subprocess
 import threading
+import traceback
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
+
+_log = logging.getLogger("repo_sync_gui.repo_resolver")
 
 
 class RepoResolver:
@@ -49,6 +53,8 @@ class RepoResolver:
         repo_input = repo_input.strip()
         if not repo_input:
             return None
+
+        _log.info("Resolving repo input: %s", repo_input)
 
         if self.is_repo_url(repo_input):
             return self._ensure_local_clone(
@@ -103,11 +109,20 @@ class RepoResolver:
 
         with self._repo_lock(clone_target):
             if clone_target.exists() and self._is_valid_git_repo(clone_target):
-                self._update_clone(clone_target)
+                _log.debug("Valid cached repo at %s — updating", clone_target)
+                try:
+                    self._update_clone(clone_target)
+                except Exception as exc:  # noqa: BLE001
+                    _log.error("Failed to update clone at %s: %s\n%s", clone_target, exc, traceback.format_exc())
+                    self._logger(f"[WARN] Update failed for cached clone — recreating: {exc}")
+                    self._recreate_clone(clone_target, auth_url)
+                    return clone_target
+
                 if not self._has_non_git_files(clone_target):
                     self._logger(
                         "[WARN] Cached repository clone contains no working-tree files. Re-creating clone..."
                     )
+                    _log.warning("Empty working tree at %s — recreating", clone_target)
                     self._recreate_clone(clone_target, auth_url)
                 return clone_target
 
@@ -116,6 +131,7 @@ class RepoResolver:
                     self._logger(
                         "[WARN] Cached repository path exists but is not a valid git repository. Re-creating clone..."
                     )
+                    _log.warning("Invalid cached repo at %s — recreating", clone_target)
                     self._recreate_clone(clone_target, auth_url)
                     return clone_target
                 raise ValueError(
@@ -125,6 +141,7 @@ class RepoResolver:
             clone_target.parent.mkdir(parents=True, exist_ok=True)
 
             self._logger(f"[INFO] Creating local clone: {repo_url} -> {clone_target}")
+            _log.info("Cloning %s -> %s", repo_url, clone_target)
             process = subprocess.run(
                 ["git", "clone", "--depth", "1", auth_url, str(clone_target)],
                 capture_output=True,
@@ -133,9 +150,11 @@ class RepoResolver:
                 timeout=180,
             )
             if process.returncode != 0:
+                _log.error("Clone failed: %s", process.stderr.strip())
                 raise ValueError(f"Failed to clone repository URL.\n{process.stderr.strip()}")
 
             self._logger(f"[INFO] Repository ready at: {clone_target}")
+            _log.info("Repository cloned to %s", clone_target)
             return clone_target
 
     @staticmethod
@@ -143,14 +162,18 @@ class RepoResolver:
         if not repo_path.exists() or not repo_path.is_dir():
             return False
 
-        process = subprocess.run(
-            ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        return process.returncode == 0 and process.stdout.strip().lower() == "true"
+        try:
+            process = subprocess.run(
+                ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            return process.returncode == 0 and process.stdout.strip().lower() == "true"
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            _log.warning("Git validity check failed for %s: %s", repo_path, exc)
+            return False
 
     @staticmethod
     def _has_non_git_files(repo_path: Path) -> bool:
@@ -167,6 +190,7 @@ class RepoResolver:
         return False
 
     def _recreate_clone(self, clone_target: Path, auth_url: str) -> None:
+        _log.info("Recreating clone at %s", clone_target)
         self._remove_path_tree(clone_target)
         clone_target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -178,6 +202,7 @@ class RepoResolver:
             timeout=180,
         )
         if process.returncode != 0:
+            _log.error("Recreate clone failed: %s", process.stderr.strip())
             raise ValueError(f"Failed to recreate cached clone.\n{process.stderr.strip() or process.stdout.strip()}")
 
         if not self._has_non_git_files(clone_target):
@@ -185,6 +210,7 @@ class RepoResolver:
                 "Repository clone does not contain working-tree files after refresh. "
                 f"Please verify repository content and permissions for: {auth_url}"
             )
+        _log.info("Clone recreated at %s", clone_target)
 
     @staticmethod
     def _remove_path_tree(path: Path) -> None:
@@ -197,7 +223,10 @@ class RepoResolver:
                 Path(target).chmod(0o700)
             except OSError:
                 pass
-            func(target)
+            try:
+                func(target)
+            except OSError as exc:
+                _log.warning("Failed to remove %s: %s", target, exc)
 
         shutil.rmtree(path, onerror=_onerror)
         if path.exists():
@@ -209,6 +238,7 @@ class RepoResolver:
         return self._cache_dir / self._url_hash(repo_url)
 
     def _update_clone(self, repo_path: Path) -> None:
+        _log.debug("Fetching updates for %s", repo_path)
         process = subprocess.run(
             [
                 "git",
@@ -228,6 +258,7 @@ class RepoResolver:
             timeout=120,
         )
         if process.returncode != 0:
+            _log.error("Fetch failed for %s: %s", repo_path, process.stderr.strip())
             raise ValueError(f"Failed to update local repository.\n{process.stderr.strip() or process.stdout.strip()}")
 
         remote_default_branch = self._get_remote_default_branch(repo_path)

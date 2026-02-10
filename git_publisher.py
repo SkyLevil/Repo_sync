@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 import subprocess
+import traceback
 from pathlib import Path
 from typing import Callable, List
+
+_log = logging.getLogger("repo_sync_gui.git_publisher")
 
 LFS_THRESHOLD_BYTES = 95 * 1024 * 1024
 
@@ -12,6 +16,7 @@ class GitPublisher:
         self._logger = logger
 
     def prepare_repository(self, repo_path: Path, branch: str) -> None:
+        _log.info("Preparing repository at %s on branch %s", repo_path, branch)
         if not (repo_path / ".git").exists():
             raise ValueError(f"'{repo_path}' is not a git repository (missing .git).")
 
@@ -23,6 +28,7 @@ class GitPublisher:
             self._logger(
                 f"[WARN] origin/{branch} not found. Using origin/{remote_branch} as preparation base."
             )
+            _log.warning("origin/%s not found — using origin/%s", branch, remote_branch)
 
         if remote_branch.lower() != branch.lower():
             self._logger(f"[INFO] Using remote branch origin/{remote_branch} for configured branch '{branch}'.")
@@ -34,8 +40,10 @@ class GitPublisher:
         self._run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{remote_branch}"], "Reset local branch")
         self._run(["git", "-C", str(repo_path), "clean", "-fd"], "Clean untracked files")
         self._logger(f"[INFO] Repository prepared at {repo_path} on branch {branch}.")
+        _log.info("Repository prepared at %s", repo_path)
 
     def commit_and_push(self, repo_path: Path, branch: str, commit_message: str) -> bool:
+        _log.info("commit_and_push: %s branch=%s", repo_path, branch)
         if not (repo_path / ".git").exists():
             raise ValueError(f"'{repo_path}' is not a git repository (missing .git).")
 
@@ -46,8 +54,10 @@ class GitPublisher:
         status = self._run_capture(["git", "-C", str(repo_path), "status", "--porcelain"], "Read status")
         if status.stdout.strip():
             self._logger("[INFO] Detected working tree changes; creating commit.")
+            _log.info("Working tree changes detected — committing")
         else:
             self._logger("[INFO] No file changes detected; creating empty sync commit.")
+            _log.info("No changes — creating empty sync commit")
 
         commit = subprocess.run(
             ["git", "-C", str(repo_path), "commit", "--allow-empty", "-m", commit_message],
@@ -57,13 +67,17 @@ class GitPublisher:
             timeout=60,
         )
         if commit.returncode != 0:
+            _log.error("Commit failed: %s", commit.stderr.strip())
             raise ValueError(f"Git commit failed.\n{commit.stderr.strip() or commit.stdout.strip()}")
 
         self._logger("[INFO] Git commit created.")
+        _log.info("Git commit created")
         self._run(["git", "-C", str(repo_path), "push", "-u", "origin", branch], f"Push commit to origin/{branch}")
+        _log.info("Push to origin/%s succeeded", branch)
 
         if lfs_touched:
             self._logger("[INFO] Uploading Git LFS objects...")
+            _log.info("Pushing LFS objects")
             self._run(["git", "-C", str(repo_path), "lfs", "push", "origin", branch], f"Push LFS objects to origin/{branch}")
             lfs_list = self._run_capture(["git", "-C", str(repo_path), "lfs", "ls-files"], "List LFS files")
             if lfs_list.stdout.strip():
@@ -80,11 +94,13 @@ class GitPublisher:
         if not large_files:
             return False
 
+        _log.info("Found %d large file(s) — setting up LFS", len(large_files))
         self._ensure_git_lfs_available(repo_path)
         self._run(["git", "-C", str(repo_path), "lfs", "install", "--local"], "Initialize Git LFS")
 
         for rel in large_files:
             self._logger(f"[INFO] Tracking large file with Git LFS: {rel}")
+            _log.info("LFS tracking: %s", rel)
             self._run(["git", "-C", str(repo_path), "lfs", "track", "--", rel], f"Track LFS file {rel}")
 
         self._run(["git", "-C", str(repo_path), "add", ".gitattributes"], "Stage .gitattributes")
@@ -101,7 +117,8 @@ class GitPublisher:
             try:
                 if p.stat().st_size > LFS_THRESHOLD_BYTES:
                     files.append(rel.as_posix())
-            except OSError:
+            except OSError as exc:
+                _log.warning("Cannot stat %s: %s", p, exc)
                 continue
         return files
 
@@ -124,6 +141,7 @@ class GitPublisher:
         if checkout.returncode == 0:
             return
 
+        _log.info("Branch %s does not exist locally — creating", branch)
         self._run(["git", "-C", str(repo_path), "checkout", "-B", branch], f"Create local branch {branch}")
 
     def _resolve_remote_branch(self, repo_path: Path, branch: str) -> str | None:
@@ -175,8 +193,14 @@ class GitPublisher:
         return branches
 
     def _run(self, cmd: list[str], action: str) -> None:
-        result = self._run_capture(cmd, action)
+        _log.debug("Running: %s (%s)", action, " ".join(cmd[:4]))
+        try:
+            result = self._run_capture(cmd, action)
+        except subprocess.TimeoutExpired:
+            _log.error("Timeout during: %s", action)
+            raise ValueError(f"{action} timed out.")
         if result.returncode != 0:
+            _log.error("%s failed (rc=%d): %s", action, result.returncode, result.stderr.strip())
             raise ValueError(f"{action} failed.\n{result.stderr.strip() or result.stdout.strip()}")
 
     @staticmethod

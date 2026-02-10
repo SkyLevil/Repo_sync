@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from crash_logger import get_app_logger
 from credential_store import CredentialStore
 from git_publisher import GitPublisher
 from repo_resolver import RepoResolver
@@ -35,6 +38,8 @@ from sync_models import SyncPair
 REMOTE_WATCH_BRANCH = "main"
 TYPE_PATH = "Path"
 TYPE_REPO = "Repository URL"
+
+_log = logging.getLogger("repo_sync_gui.window")
 
 
 class WorkerSignals(QObject):
@@ -57,6 +62,7 @@ class FunctionTask(QRunnable):
             result = self._fn(*self._args, signals=self.signals, **self._kwargs)
             self.signals.finished.emit(result or {})
         except Exception as exc:  # noqa: BLE001
+            _log.error("Worker task failed: %s\n%s", exc, traceback.format_exc())
             self.signals.error.emit(str(exc))
 
 
@@ -65,6 +71,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Folder Sync (Path <-> Repository URL)")
         self.resize(1100, 780)
+
+        _log.info("MainWindow initialising")
 
         self.settings = QSettings("RepoSync", "FolderSyncGui")
         self.app_data_dir = Path.home() / ".repo_sync_gui"
@@ -187,6 +195,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Log"))
         layout.addWidget(self.log)
 
+        self._current_status_level = "idle"
         self._set_status_indicator("idle", "Idle")
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
@@ -198,11 +207,32 @@ class MainWindow(QMainWindow):
             self._add_row()
 
         self._update_timer_state()
+        _log.info("MainWindow ready")
+
+    # ------------------------------------------------------------------
+    # Close / lifecycle
+    # ------------------------------------------------------------------
 
     def closeEvent(self, event):  # noqa: N802
-        self._save_settings()
+        _log.info("MainWindow closing — saving settings")
+        try:
+            self._save_settings()
+        except Exception:  # noqa: BLE001
+            _log.error("Failed to save settings on close:\n%s", traceback.format_exc())
         self.check_timer.stop()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Status helpers
+    # ------------------------------------------------------------------
+
+    def _set_status_indicator(self, level: str, text: str) -> None:
+        """Update the status bar colour indicator."""
+        self._current_status_level = level
+        try:
+            self.statusBar().showMessage(text)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(f"Status: {text}")
@@ -215,31 +245,29 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(text, timeout_ms)
         except Exception:  # noqa: BLE001
             return
-        if not hasattr(self, "status_detail_label"):
-            return
-        colors = {
-            "idle": ("#6b7280", "#f3f4f6"),
-            "info": ("#1d4ed8", "#dbeafe"),
-            "progress": ("#047857", "#d1fae5"),
-            "warning": ("#92400e", "#fef3c7"),
-            "error": ("#991b1b", "#fee2e2"),
-            "success": ("#065f46", "#d1fae5"),
-        }
-        fg, bg = colors.get(level, colors["info"])
-        try:
-            self.status_detail_label.setText(text)
-            self.status_detail_label.setStyleSheet(
-                f"padding: 2px 8px; border-radius: 6px; color: {fg}; background-color: {bg}; font-weight: 600;"
-            )
-        except Exception:  # noqa: BLE001
-            self.status_detail_label.setText(text)
+
+    # ------------------------------------------------------------------
+    # Log pane — every message also goes to the persistent app.log
+    # ------------------------------------------------------------------
 
     def _append_log(self, message: str) -> None:
         self.log.appendPlainText(message)
-            self._show_status_message(message, 15000)
-            self._show_status_message(message, 10000)
-            self._show_status_message(message, 5000)
-            self._show_status_message(message, 5000)
+        # Mirror to persistent rotating log
+        if "[ERROR]" in message:
+            _log.error(message)
+        elif "[WARN]" in message:
+            _log.warning(message)
+        elif "[SUCCESS]" in message or "[DONE]" in message:
+            _log.info(message)
+        else:
+            _log.info(message)
+
+    # ------------------------------------------------------------------
+    # Table / combo helpers
+    # ------------------------------------------------------------------
+
+    def _create_type_combo(self, value: str = TYPE_PATH) -> QComboBox:
+        combo = QComboBox()
         combo.addItems([TYPE_PATH, TYPE_REPO])
         combo.setCurrentText(value if value in (TYPE_PATH, TYPE_REPO) else TYPE_PATH)
         return combo
@@ -273,6 +301,10 @@ class MainWindow(QMainWindow):
         if selected:
             self.table.setItem(row, column, QTableWidgetItem(selected))
 
+    # ------------------------------------------------------------------
+    # Config snapshot
+    # ------------------------------------------------------------------
+
     def _snapshot_config(self) -> dict:
         pairs: List[Dict[str, str]] = []
         for row in range(self.table.rowCount()):
@@ -304,6 +336,10 @@ class MainWindow(QMainWindow):
             "auto_sync": self.auto_sync_on_change_checkbox.isChecked(),
             "last_state_hash": self.last_state_hash,
         }
+
+    # ------------------------------------------------------------------
+    # Endpoint / pair resolution
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _resolve_endpoint(
@@ -358,6 +394,10 @@ class MainWindow(QMainWindow):
 
         return pairs, repo_targets
 
+    # ------------------------------------------------------------------
+    # Sync (background)
+    # ------------------------------------------------------------------
+
     def _run_sync_async(self, show_error_dialog: bool, clear_log: bool) -> None:
         if self.sync_in_progress:
             self._append_log("[INFO] Sync already running.")
@@ -371,8 +411,16 @@ class MainWindow(QMainWindow):
         self._set_status("Syncing in background...")
         self.sync_in_progress = True
 
+        # Auto-save settings before starting sync (crash protection)
+        try:
+            self._save_settings()
+            _log.info("Settings auto-saved before sync")
+        except Exception:  # noqa: BLE001
+            _log.warning("Failed to auto-save settings before sync:\n%s", traceback.format_exc())
+
         config = self._snapshot_config()
         config["auto_triggered"] = not show_error_dialog
+        _log.info("Sync started (auto_triggered=%s, pairs=%d)", config["auto_triggered"], len(config["pairs"]))
         task = FunctionTask(self._sync_job, config)
         task.signals.log.connect(self._append_log)
         task.signals.progress.connect(self._on_progress)
@@ -381,11 +429,17 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(task)
 
     def _on_progress(self, done: int, total: int, message: str) -> None:
-        percent = int((done / max(total, 1)) * 100)
-        self.progress_bar.setValue(percent)
-        self.progress_bar.setFormat(f"{percent}% - {message}")
-        self._set_status_indicator("progress", f"{percent}%")
-        self._show_status_message(f"{percent}% - {message}")
+        try:
+            percent = int((done / max(total, 1)) * 100)
+            self.progress_bar.setValue(percent)
+            self.progress_bar.setFormat(f"{percent}% - {message}")
+            self._set_status_indicator("progress", f"{percent}%")
+            self._show_status_message(f"{percent}% - {message}")
+        except Exception:  # noqa: BLE001
+            _log.warning("Progress update failed:\n%s", traceback.format_exc())
+
+    def _sync_job(self, config: dict, signals: WorkerSignals) -> dict:
+        """Run the full sync pipeline in a background thread."""
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
 
@@ -396,7 +450,12 @@ class MainWindow(QMainWindow):
             logger(f"[INFO] Active repository target: {url}")
 
         for repo_path, _url in unique_repo_targets.values():
-            GitPublisher(logger).prepare_repository(repo_path, config["push_branch"])
+            try:
+                GitPublisher(logger).prepare_repository(repo_path, config["push_branch"])
+            except Exception as exc:  # noqa: BLE001
+                _log.error("Repository preparation failed for %s: %s", repo_path, exc)
+                logger(f"[ERROR] Repository preparation failed for {repo_path}: {exc}")
+                raise
 
         engine = SyncEngine(logger)
         sync_two_way = config["two_way"]
@@ -413,22 +472,29 @@ class MainWindow(QMainWindow):
         )
 
         if config["auto_push"]:
-            pushed_paths = set()
+            pushed_paths: set[str] = set()
             for repo_path, repo_url in repo_targets:
                 key = str(repo_path)
                 if key in pushed_paths:
                     continue
                 pushed_paths.add(key)
                 logger(f"[INFO] Auto commit/push started on {repo_path} ({repo_url})...")
-                GitPublisher(logger).commit_and_push(repo_path, config["push_branch"], config["commit_message"])
+                try:
+                    GitPublisher(logger).commit_and_push(repo_path, config["push_branch"], config["commit_message"])
+                except Exception as exc:  # noqa: BLE001
+                    _log.error("Auto push failed for %s: %s", repo_url, exc)
+                    logger(f"[ERROR] Auto push failed for {repo_url}: {exc}")
+                    raise
 
         new_state = self._compute_state_value(config, pairs, resolver)
+        _log.info("Sync job completed successfully")
         return {"new_state": new_state}
 
     def _on_sync_error(self, error_text: str, show_error_dialog: bool) -> None:
         self.sync_in_progress = False
         self._set_status("Idle")
         self._append_log(f"[ERROR] {error_text}")
+        _log.error("Sync error: %s", error_text)
         if show_error_dialog:
             QMessageBox.critical(self, "Sync failed", error_text)
 
@@ -439,12 +505,20 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         self.progress_bar.setFormat("100% - done")
         self._set_status("Idle")
-        self._save_settings()
+        try:
+            self._save_settings()
+        except Exception:  # noqa: BLE001
+            _log.error("Failed to save settings after sync:\n%s", traceback.format_exc())
+
+    # ------------------------------------------------------------------
+    # Periodic check (background)
+    # ------------------------------------------------------------------
 
     def _schedule_next_check(self) -> None:
         if not self.periodic_check_checkbox.isChecked():
             return
-        self.check_timer.start(1000 if self.continuous_watch_checkbox.isChecked() else self.interval_spinbox.value() * 1000)
+        interval = 1000 if self.continuous_watch_checkbox.isChecked() else self.interval_spinbox.value() * 1000
+        self.check_timer.start(interval)
 
     def _update_timer_state(self) -> None:
         self.interval_spinbox.setEnabled(
@@ -457,6 +531,7 @@ class MainWindow(QMainWindow):
 
         mode = "continuous" if self.continuous_watch_checkbox.isChecked() else "interval"
         self._append_log(f"[INFO] Auto update checks active ({mode}, branch '{REMOTE_WATCH_BRANCH}').")
+        _log.info("Auto update checks active (%s)", mode)
         self._set_status("Watching for new commits/changes...")
         self._schedule_next_check()
 
@@ -486,6 +561,7 @@ class MainWindow(QMainWindow):
     def _on_check_error(self, error_text: str) -> None:
         self.check_in_progress = False
         self._append_log(f"[WARN] Periodic check failed: {error_text}")
+        _log.warning("Periodic check failed: %s", error_text)
         self._set_status("Watching for new commits/changes...")
         self._schedule_next_check()
 
@@ -498,6 +574,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"[INFO] Baseline captured for branch '{REMOTE_WATCH_BRANCH}'.")
         elif result.get("changed"):
             self._append_log("[INFO] New commit/change detected.")
+            _log.info("Change detected — triggering auto sync")
             self.last_state_hash = new_state
             if result.get("auto_sync"):
                 self._run_sync_async(show_error_dialog=False, clear_log=False)
@@ -506,6 +583,10 @@ class MainWindow(QMainWindow):
 
         self._set_status("Watching for new commits/changes...")
         self._schedule_next_check()
+
+    # ------------------------------------------------------------------
+    # State hashing
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _hash_directory(path: Path) -> str:
@@ -521,12 +602,16 @@ class MainWindow(QMainWindow):
             if ".git" in relative.parts:
                 continue
             hasher.update(relative.as_posix().encode("utf-8"))
-            with file_path.open("rb") as handle:
-                while True:
-                    chunk = handle.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    hasher.update(chunk)
+            try:
+                with file_path.open("rb") as handle:
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        hasher.update(chunk)
+            except OSError as exc:
+                _log.warning("Cannot read file for hashing: %s — %s", file_path, exc)
+                continue
         return hasher.hexdigest()
 
     def _compute_state_by_pairs(self, config: dict, resolver: RepoResolver) -> str:
@@ -538,14 +623,18 @@ class MainWindow(QMainWindow):
                 if not endpoint_value:
                     continue
 
-                endpoint_path, _ = self._resolve_endpoint(
-                    resolver,
-                    endpoint_type,
-                    endpoint_value,
-                    config["username"],
-                    config["password"],
-                )
-                endpoint_hash = self._hash_directory(endpoint_path)
+                try:
+                    endpoint_path, _ = self._resolve_endpoint(
+                        resolver,
+                        endpoint_type,
+                        endpoint_value,
+                        config["username"],
+                        config["password"],
+                    )
+                    endpoint_hash = self._hash_directory(endpoint_path)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("State hash failed for pair %d %s: %s", idx, endpoint_side, exc)
+                    endpoint_hash = ""
                 hasher.update(f"{idx}:{endpoint_side}:{endpoint_type}".encode("utf-8"))
                 hasher.update(endpoint_hash.encode("utf-8"))
 
@@ -556,7 +645,12 @@ class MainWindow(QMainWindow):
         _ = pairs
         return self._compute_state_by_pairs(config, resolver)
 
+    # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+
     def _save_settings(self) -> None:
+        _log.debug("Saving settings")
         self.settings.setValue("two_way", self.two_way_checkbox.isChecked())
         self.settings.setValue("delete_stale", self.delete_checkbox.isChecked())
         self.settings.setValue("periodic_check", self.periodic_check_checkbox.isChecked())
@@ -589,13 +683,17 @@ class MainWindow(QMainWindow):
                 "username": self.username_edit.text().strip(),
                 "password": self.password_edit.text().strip(),
             }
-            self.settings.setValue("credentials_encrypted", self.credential_store.encrypt_payload(payload))
+            try:
+                self.settings.setValue("credentials_encrypted", self.credential_store.encrypt_payload(payload))
+            except Exception:  # noqa: BLE001
+                _log.error("Failed to encrypt credentials:\n%s", traceback.format_exc())
         else:
             self.settings.remove("credentials_encrypted")
 
         self.settings.sync()
 
     def _load_settings(self) -> None:
+        _log.debug("Loading settings")
         self.two_way_checkbox.setChecked(self._to_bool(self.settings.value("two_way", False)))
         self.delete_checkbox.setChecked(self._to_bool(self.settings.value("delete_stale", False)))
         self.periodic_check_checkbox.setChecked(self._to_bool(self.settings.value("periodic_check", False)))
@@ -613,6 +711,7 @@ class MainWindow(QMainWindow):
         try:
             pairs = json.loads(pairs_json)
         except json.JSONDecodeError:
+            _log.warning("Corrupt pairs_json in settings — resetting to empty")
             pairs = []
 
         self.table.setRowCount(0)
@@ -630,8 +729,13 @@ class MainWindow(QMainWindow):
                 payload = self.credential_store.decrypt_payload(encrypted_credentials)
                 self.username_edit.setText(payload.get("username", ""))
                 self.password_edit.setText(payload.get("password", ""))
-            except Exception:
+            except Exception:  # noqa: BLE001
+                _log.warning("Could not decrypt stored credentials:\n%s", traceback.format_exc())
                 self._append_log("[WARN] Could not decrypt stored credentials.")
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _to_bool(value) -> bool:
