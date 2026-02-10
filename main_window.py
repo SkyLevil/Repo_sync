@@ -132,7 +132,6 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
-        self._set_status_indicator("idle", "Idle")
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -188,6 +187,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Log"))
         layout.addWidget(self.log)
 
+        self._set_status_indicator("idle", "Idle")
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self._on_periodic_check)
@@ -208,7 +208,15 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Status: {text}")
         level = "idle" if text.strip().lower() == "idle" else "info"
         self._set_status_indicator(level, text)
-    def _set_status_indicator(self, level: str, text: str) -> None:
+        self._show_status_message(text)
+
+    def _show_status_message(self, text: str, timeout_ms: int = 0) -> None:
+        try:
+            self.statusBar().showMessage(text, timeout_ms)
+        except Exception:  # noqa: BLE001
+            return
+        if not hasattr(self, "status_detail_label"):
+            return
         colors = {
             "idle": ("#6b7280", "#f3f4f6"),
             "info": ("#1d4ed8", "#dbeafe"),
@@ -218,17 +226,20 @@ class MainWindow(QMainWindow):
             "success": ("#065f46", "#d1fae5"),
         }
         fg, bg = colors.get(level, colors["info"])
-        self.status_detail_label.setText(text)
-        self.status_detail_label.setStyleSheet(
-            f"padding: 2px 8px; border-radius: 6px; color: {fg}; background-color: {bg}; font-weight: 600;"
-        )
+        try:
+            self.status_detail_label.setText(text)
+            self.status_detail_label.setStyleSheet(
+                f"padding: 2px 8px; border-radius: 6px; color: {fg}; background-color: {bg}; font-weight: 600;"
+            )
+        except Exception:  # noqa: BLE001
+            self.status_detail_label.setText(text)
 
     def _append_log(self, message: str) -> None:
         self.log.appendPlainText(message)
-            self._set_status_indicator("error", "Error")
-            self._set_status_indicator("warning", "Warning")
-            self._set_status_indicator("success", "Success")
-            self._set_status_indicator("info", "Working")
+            self._show_status_message(message, 15000)
+            self._show_status_message(message, 10000)
+            self._show_status_message(message, 5000)
+            self._show_status_message(message, 5000)
         combo.addItems([TYPE_PATH, TYPE_REPO])
         combo.setCurrentText(value if value in (TYPE_PATH, TYPE_REPO) else TYPE_PATH)
         return combo
@@ -374,7 +385,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(percent)
         self.progress_bar.setFormat(f"{percent}% - {message}")
         self._set_status_indicator("progress", f"{percent}%")
-    def _sync_job(self, config: dict, signals: WorkerSignals) -> dict:
+        self._show_status_message(f"{percent}% - {message}")
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
 
