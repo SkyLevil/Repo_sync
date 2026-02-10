@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
+        self._set_status_indicator("idle", "Idle")
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -205,12 +206,29 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(f"Status: {text}")
+        level = "idle" if text.strip().lower() == "idle" else "info"
+        self._set_status_indicator(level, text)
+    def _set_status_indicator(self, level: str, text: str) -> None:
+        colors = {
+            "idle": ("#6b7280", "#f3f4f6"),
+            "info": ("#1d4ed8", "#dbeafe"),
+            "progress": ("#047857", "#d1fae5"),
+            "warning": ("#92400e", "#fef3c7"),
+            "error": ("#991b1b", "#fee2e2"),
+            "success": ("#065f46", "#d1fae5"),
+        }
+        fg, bg = colors.get(level, colors["info"])
+        self.status_detail_label.setText(text)
+        self.status_detail_label.setStyleSheet(
+            f"padding: 2px 8px; border-radius: 6px; color: {fg}; background-color: {bg}; font-weight: 600;"
+        )
 
     def _append_log(self, message: str) -> None:
         self.log.appendPlainText(message)
-
-    def _create_type_combo(self, value: str = TYPE_PATH) -> QComboBox:
-        combo = QComboBox()
+            self._set_status_indicator("error", "Error")
+            self._set_status_indicator("warning", "Warning")
+            self._set_status_indicator("success", "Success")
+            self._set_status_indicator("info", "Working")
         combo.addItems([TYPE_PATH, TYPE_REPO])
         combo.setCurrentText(value if value in (TYPE_PATH, TYPE_REPO) else TYPE_PATH)
         return combo
@@ -355,7 +373,7 @@ class MainWindow(QMainWindow):
         percent = int((done / max(total, 1)) * 100)
         self.progress_bar.setValue(percent)
         self.progress_bar.setFormat(f"{percent}% - {message}")
-
+        self._set_status_indicator("progress", f"{percent}%")
     def _sync_job(self, config: dict, signals: WorkerSignals) -> dict:
         logger = lambda msg: signals.log.emit(msg)
         resolver = RepoResolver(logger, cache_dir=self.app_data_dir / "repo_cache")
